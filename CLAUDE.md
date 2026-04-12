@@ -4,77 +4,80 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-NeoShell — cross-platform SSH/server management tool (FinalShell alternative). Targets macOS, Windows, Linux.
+NeoShell — cross-platform SSH/server management tool (FinalShell alternative). Pure Rust, native GUI. Targets macOS, Windows, Linux.
 
 ## Tech Stack
 
-- **Frontend**: React 19 + TypeScript 5.8 + Vite 7 + TailwindCSS v4
-- **Backend**: Rust / Tauri v2
-- **Terminal emulation**: xterm.js v6 (addons: fit, web-links, webgl)
+- **GUI**: iced 0.13 (wgpu GPU-accelerated, native Rust)
+- **Terminal**: VTE parser + custom canvas renderer
 - **SSH**: Rust `ssh2` crate (libssh2 binding)
-- **State management**: Zustand v5
-- **Routing**: react-router-dom v7 (hash router for Tauri)
-- **Package manager**: pnpm
+- **Encryption**: AES-256-GCM + Argon2id key derivation
+- **Async**: tokio
+- **State**: parking_lot RwLock/Mutex
 
 ## Build Commands
 
-**Critical**: `/opt/bin/cc` is a broken linker on this machine. All Rust/Cargo commands require:
+**Critical**: `/opt/bin/cc` is broken. All cargo commands require:
 ```bash
-export RUSTFLAGS="-C linker=/usr/bin/cc" CC=/usr/bin/cc CXX=/usr/bin/c++
+RUSTFLAGS="-C linker=/usr/bin/cc" CC=/usr/bin/cc CXX=/usr/bin/c++
 ```
 
 ```bash
-# Frontend only (fast, no Rust compilation)
-pnpm dev              # Vite dev server on :1420
-pnpm build            # tsc + vite build → dist/
-
-# Full Tauri (needs linker env vars above)
-pnpm tauri dev        # Dev mode with hot reload + Rust backend
-pnpm tauri build      # Production build → src-tauri/target/release/bundle/
-
-# Rust only (from src-tauri/)
-cargo check           # Type check Rust code
-cargo test            # Run Rust tests
-cargo clippy          # Lint Rust code
+cargo check           # Type check
+cargo build           # Debug build
+cargo run             # Run app
+cargo test            # Run tests (terminal has 11 unit tests)
+cargo clippy          # Lint
+cargo build --release # Release build
 ```
 
-`libssh2` must be installed for the ssh2 crate: `brew install libssh2` (macOS).
+`libssh2` required: `brew install libssh2` (macOS).
 
 ## Architecture
 
 ```
-src/                    # React frontend
-  main.tsx              # Entry point, mounts React app
-  App.tsx               # Root component
-src-tauri/              # Rust backend
-  src/lib.rs            # Tauri command handlers, plugin registration
-  Cargo.toml            # Rust dependencies
-  tauri.conf.json       # App config (window, bundle, security)
-  capabilities/         # Tauri v2 permission capabilities
+src/
+  main.rs             # Entry point, launches iced app
+  app.rs              # iced Application: state, update, view, subscriptions
+  crypto/mod.rs       # AES-256-GCM encryption, Argon2id key derivation
+  storage/mod.rs      # Encrypted connection vault (vault.json)
+  ssh/mod.rs          # SSH session manager (ssh2 + background threads)
+  terminal/mod.rs     # VTE terminal emulator (grid + parser)
+  ui/
+    mod.rs            # UI module re-exports
+    theme.rs          # Color constants
 ```
 
 ### Data Flow
-1. Frontend calls Rust functions via `invoke()` from `@tauri-apps/api/core`
-2. Rust handlers are registered with `tauri::generate_handler![]` in `lib.rs`
-3. SSH sessions managed entirely in Rust — frontend never touches raw sockets
-4. Terminal I/O: Rust SSH → Tauri events → xterm.js renders
+1. User interacts with iced GUI → generates `Message`
+2. `update()` handles messages, dispatches `Task::perform` for async ops
+3. SSH data arrives via `mpsc::Receiver<SshEvent>`, polled at 50ms intervals
+4. Terminal grid updated with VTE parser, rendered on iced Canvas
 
 ### Key Patterns
-- Tauri commands are `#[tauri::command]` annotated functions in `src-tauri/src/`
-- Frontend state stores in Zustand — each domain (connections, terminals, settings) gets its own store
-- App identifier: `com.firshme.neoshell`
+- App uses iced functional API: `iced::application(title, update, view)`
+- State machine: Setup → Locked → Main screen
+- SSH sessions run on std::thread (ssh2 is blocking), communicate via channels
+- Terminal: `TerminalGrid` implements `vte::Perform` for escape sequence handling
+- Encrypted vault at `~/Library/Application Support/neoshell/vault.json`
+- Two-layer encryption: master password → KEK (Argon2id) → DEK → connection data
 
-## Core Features (Planned)
+### Keyboard Handling
+- `event::listen_with` captures keyboard events when terminal is active
+- `key_to_terminal_bytes()` converts iced key events to terminal escape sequences
+- Keys NOT captured by widgets (text_input) are forwarded to active SSH session
 
-1. SSH terminal with multi-tab sessions
-2. SFTP file browser/transfer
-3. Server monitoring (CPU, memory, disk, network)
-4. Connection manager with encrypted credential storage
-5. Port forwarding / tunneling
-6. Local terminal support
+## Core Features
+
+1. SSH terminal with multi-tab sessions (implemented)
+2. Connection manager with AES-256-GCM encrypted storage (implemented)
+3. Master password vault with Argon2id key derivation (implemented)
+4. VTE terminal emulator with 256-color + truecolor support (implemented)
+5. SFTP file browser/transfer (planned)
+6. Server monitoring (planned)
 
 ## Release & CI
 
 - Tag-based releases trigger CI/CD builds (not main branch pushes)
 - `dev` branch is local-only, never push to remote
-- Cross-platform builds: macOS (.dmg/.app), Windows (.msi/.exe), Linux (.deb/.AppImage)
+- Single binary output, no web runtime dependencies
