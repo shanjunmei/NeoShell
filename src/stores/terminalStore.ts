@@ -21,7 +21,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   activeTabId: null,
 
   openTab: async (connectionId: string, title: string): Promise<string> => {
-    const sessionId = await invoke('cmd_open_ssh_session', { connectionId }) as string;
+    const sessionId = await invoke('cmd_connect_ssh', { connectionId }) as string;
     tabCounter += 1;
     const tabId = `tab-${tabCounter}`;
 
@@ -46,7 +46,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     const tab = state.tabs.find((t) => t.id === tabId);
     if (tab) {
       try {
-        await invoke('cmd_close_ssh_session', { sessionId: tab.sessionId });
+        await invoke('cmd_disconnect_ssh', { sessionId: tab.sessionId });
       } catch {
         // session may already be closed
       }
@@ -56,7 +56,6 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       const remaining = s.tabs.filter((t) => t.id !== tabId);
       let nextActiveId: string | null = null;
       if (remaining.length > 0) {
-        // activate last tab if the active one was closed
         if (s.activeTabId === tabId) {
           nextActiveId = remaining[remaining.length - 1].id;
         } else {
@@ -78,11 +77,11 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   writeToSession: async (sessionId: string, data: string) => {
-    await invoke('cmd_write_to_session', { sessionId, data });
+    await invoke('cmd_ssh_write', { sessionId, data });
   },
 
   resizeSession: async (sessionId: string, cols: number, rows: number) => {
-    await invoke('cmd_resize_session', { sessionId, cols, rows });
+    await invoke('cmd_ssh_resize', { sessionId, cols, rows });
   },
 
   removeTabBySessionId: (sessionId: string) => {

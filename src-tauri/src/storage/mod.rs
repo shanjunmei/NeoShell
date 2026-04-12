@@ -7,6 +7,7 @@ use crate::crypto::{CryptoEngine, VaultHeader};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ConnectionConfig {
+    #[serde(default)]
     pub id: String,
     pub name: String,
     pub host: String,

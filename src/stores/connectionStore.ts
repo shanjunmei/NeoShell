@@ -26,10 +26,10 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
 
   checkVaultStatus: async () => {
     try {
-      const status = await invoke('cmd_check_vault_status') as { password_set: boolean; locked: boolean };
+      const passwordSet = await invoke('cmd_is_master_password_set') as boolean;
       set({
-        isPasswordSet: status.password_set,
-        isVaultLocked: status.locked,
+        isPasswordSet: passwordSet,
+        isVaultLocked: passwordSet,
         loading: false,
       });
     } catch {
@@ -44,22 +44,28 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
 
   unlockVault: async (password: string): Promise<boolean> => {
     try {
-      await invoke('cmd_unlock_vault', { password });
-      set({ isVaultLocked: false });
-      return true;
+      const result = await invoke('cmd_unlock_vault', { password }) as boolean;
+      if (result) {
+        set({ isVaultLocked: false });
+      }
+      return result;
     } catch {
       return false;
     }
   },
 
   loadConnections: async () => {
-    const connections = await invoke('cmd_list_connections') as ConnectionInfo[];
-    set({ connections });
+    try {
+      const connections = await invoke('cmd_get_connections') as ConnectionInfo[];
+      set({ connections });
+    } catch {
+      set({ connections: [] });
+    }
   },
 
   saveConnection: async (config: ConnectionConfig): Promise<string> => {
     const id = await invoke('cmd_save_connection', { config }) as string;
-    const connections = await invoke('cmd_list_connections') as ConnectionInfo[];
+    const connections = await invoke('cmd_get_connections') as ConnectionInfo[];
     set({ connections });
     return id;
   },
@@ -73,7 +79,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
 
   updateConnection: async (config: ConnectionConfig) => {
     await invoke('cmd_update_connection', { config });
-    const connections = await invoke('cmd_list_connections') as ConnectionInfo[];
+    const connections = await invoke('cmd_get_connections') as ConnectionInfo[];
     set({ connections });
   },
 
