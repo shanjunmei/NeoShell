@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    neoshell_temp_lib::run()
+    neoshell_lib::run()
 }
