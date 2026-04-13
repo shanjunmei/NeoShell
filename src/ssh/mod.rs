@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read as IoRead, Write as IoWrite};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -224,9 +224,10 @@ impl SshManager {
         // --- Establish TCP + SSH handshake (blocking) ----------------------
         let addr = format!("{}:{}", host, port);
         let tcp = TcpStream::connect_timeout(
-            &addr
-                .parse()
-                .map_err(|e| format!("Invalid address '{}': {}", addr, e))?,
+            &addr.to_socket_addrs()
+                .map_err(|e| format!("DNS resolve failed for '{}': {}", addr, e))?
+                .next()
+                .ok_or_else(|| format!("No address found for '{}'", addr))?,
             Duration::from_secs(10),
         )
         .map_err(|e| format!("TCP connect to {} failed: {}", addr, e))?;
@@ -1191,9 +1192,10 @@ fn reconnect_ssh(
 ) -> Result<(Session, ssh2::Channel, Session), String> {
     let addr = format!("{}:{}", params.host, params.port);
     let tcp = TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .map_err(|e| format!("Invalid address: {}", e))?,
+        &addr.to_socket_addrs()
+            .map_err(|e| format!("DNS resolve failed: {}", e))?
+            .next()
+            .ok_or("No address found")?,
         Duration::from_secs(10),
     )
     .map_err(|e| format!("TCP reconnect failed: {}", e))?;

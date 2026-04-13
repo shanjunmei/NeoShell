@@ -390,8 +390,20 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             let tab_id2 = tab_id.clone();
             Task::perform(
                 async move {
+                    use std::io::Write;
+                    let mut log = std::fs::OpenOptions::new().create(true).append(true)
+                        .open("/tmp/neoshell-connect.log").ok();
+                    macro_rules! dbg_log {
+                        ($($arg:tt)*) => { if let Some(ref mut f) = log { let _ = writeln!(f, $($arg)*); } }
+                    }
+
+                    dbg_log!("[{}] ConnectTo: id={}", chrono_now(), id);
                     let config = store.get_connection(&id)?;
+                    dbg_log!("[{}] Config: {}@{}:{} auth={} key={:?}",
+                        chrono_now(), config.username, config.host, config.port,
+                        config.auth_type, config.private_key.as_deref().unwrap_or("none"));
                     let session_id = ssh.connect_config(&config)?;
+                    dbg_log!("[{}] Connected: session={}", chrono_now(), session_id);
                     let title = format!("{}@{}:{}", config.username, config.host, config.port);
                     Ok((tab_id2, session_id, title, id))
                 },
@@ -399,7 +411,14 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                     Ok((tab_id, session_id, title, conn_id)) => {
                         Message::SshConnected(tab_id, session_id, title, conn_id)
                     }
-                    Err(e) => Message::Error(e),
+                    Err(e) => {
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                            .open("/tmp/neoshell-connect.log") {
+                            use std::io::Write;
+                            let _ = writeln!(f, "FAILED: {}", e);
+                        }
+                        Message::Error(e)
+                    }
                 },
             )
         }
@@ -1085,7 +1104,11 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         Message::Tick => Task::none(),
         Message::None => Task::none(),
         Message::Error(e) => {
-            // Remove any placeholder "Connecting..." tabs
+            // Remove placeholder "Connecting..." tabs and get their connection_ids
+            let failed_ids: Vec<String> = state.tabs.iter()
+                .filter(|t| t.session_id.is_empty())
+                .map(|t| t.connection_id.clone())
+                .collect();
             state.tabs.retain(|t| !t.session_id.is_empty());
             if state.tabs.is_empty() {
                 state.active_tab = None;
@@ -1094,9 +1117,13 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                     state.active_tab = Some(state.tabs.len().saturating_sub(1));
                 }
             }
+            // Clear connecting state for failed connections (allow manual retry)
+            for fid in &failed_ids {
+                state.connecting_ids.remove(fid);
+            }
+            // Don't clear ALL connecting_ids — other connections may still be in flight
             state.error_message = e;
             state.transfer_progress = None;
-            state.connecting_ids.clear();
             Task::none()
         }
     }
@@ -2924,6 +2951,11 @@ fn key_to_terminal_bytes(
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
+
+fn chrono_now() -> String {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    format!("{}.{:03}", d.as_secs(), d.subsec_millis())
+}
 
 fn format_bytes(bytes: u64) -> String {
     if bytes > 1_073_741_824 {
