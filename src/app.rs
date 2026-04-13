@@ -627,6 +627,14 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             if state.editor_file_path.is_some() {
                 return Task::none();
             }
+            // Don't send keys when form is open
+            if state.show_form {
+                return Task::none();
+            }
+            // Don't send keys when network detail popup is open
+            if state.selected_interface.is_some() {
+                return Task::none();
+            }
             if let Some(idx) = state.active_tab {
                 if let Some(tab) = state.tabs.get(idx) {
                     let session_id = tab.session_id.clone();
@@ -894,35 +902,22 @@ fn subscription(state: &NeoShell) -> Subscription<Message> {
     }
 
     // Listen for keyboard events when we are on the main screen with an active
-    // terminal tab. We use event::listen_with so we can capture key events
+    // terminal tab. We use event::listen so we can capture raw key events
     // even when the canvas does not have focus.
     if state.screen == Screen::Main && state.active_tab.is_some() {
-        subs.push(event::listen_with(handle_event));
+        subs.push(event::listen().map(|evt| {
+            match evt {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    Message::KeyboardEvent(key, modifiers)
+                }
+                _ => Message::None,
+            }
+        }));
     }
 
     Subscription::batch(subs)
 }
 
-/// Global event handler forwarded from event::listen_with.
-/// Only forward key presses that were not captured by a widget (e.g. text_input).
-fn handle_event(
-    evt: iced::Event,
-    _status: event::Status,
-    _window: iced::window::Id,
-) -> Option<Message> {
-    match evt {
-        iced::Event::Keyboard(keyboard::Event::KeyPressed {
-            key,
-            modifiers,
-            ..
-        }) => {
-            // Forward ALL keyboard events — filtering is done in update()
-            // based on app state (editor open, form open, etc.)
-            Some(Message::KeyboardEvent(key, modifiers))
-        }
-        _ => None,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // View
@@ -2284,12 +2279,19 @@ impl<Message> canvas::Program<Message> for TerminalView {
 
                 // Draw character
                 if cell.c != ' ' && cell.c != '\0' {
+                    let (char_font, char_size) = if cell.wide {
+                        // CJK: use system default font which has proper CJK glyphs
+                        (Font::DEFAULT, Pixels(font_size * 1.1))
+                    } else {
+                        (Font::MONOSPACE, Pixels(font_size))
+                    };
+
                     frame.fill_text(canvas::Text {
                         content: cell.c.to_string(),
                         position: Point::new(x as f32 * cell_w, y as f32 * cell_h),
                         color: fg,
-                        size: Pixels(font_size),
-                        font: Font::MONOSPACE,
+                        size: char_size,
+                        font: char_font,
                         ..canvas::Text::default()
                     });
                 }

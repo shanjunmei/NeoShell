@@ -344,6 +344,7 @@ impl SshManager {
                      tmux has-session -t {n} 2>/dev/null && tmux attach-session -t {n} || \
                      (tmux new-session -d -s {n} -x 80 -y 24 2>/dev/null && \
                       tmux set-option -t {n} status off 2>/dev/null && \
+                      tmux set-option -t {n} escape-time 10 2>/dev/null && \
                       tmux attach-session -t {n}) || exec $SHELL -l",
                     n = name
                 );
@@ -1216,8 +1217,9 @@ fn reconnect_ssh(
         SessionMode::Persistent(name) => {
             let cmd = format!(
                 "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; \
-                 tmux attach-session -t {} 2>/dev/null || exec $SHELL -l",
-                name
+                 tmux set-option -t {n} escape-time 10 2>/dev/null; \
+                 tmux attach-session -t {n} 2>/dev/null || exec $SHELL -l",
+                n = name
             );
             channel
                 .exec(&cmd)
