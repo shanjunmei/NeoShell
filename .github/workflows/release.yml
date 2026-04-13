@@ -20,9 +20,7 @@ jobs:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
@@ -38,23 +36,20 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.target }}
 
-      - name: Create .app bundle and DMG
+      - name: Package DMG
         run: |
           ARCH=$(echo "${{ matrix.target }}" | cut -d'-' -f1)
           VERSION=${GITHUB_REF_NAME#v}
-          APP_DIR="dist/NeoShell.app"
-          mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-          cp "target/${{ matrix.target }}/release/neoshell" "$APP_DIR/Contents/MacOS/"
-
-          # Info.plist
-          cat > "$APP_DIR/Contents/Info.plist" <<EOF
+          APP="dist/NeoShell.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/neoshell" "$APP/Contents/MacOS/"
+          cat > "$APP/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
             <key>CFBundleName</key><string>NeoShell</string>
             <key>CFBundleIdentifier</key><string>com.neoshell.app</string>
             <key>CFBundleVersion</key><string>${VERSION}</string>
-            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleExecutable</key><string>neoshell</string>
             <key>CFBundleIconFile</key><string>icon</string>
@@ -62,46 +57,32 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           EOF
-
-          # Icon
           if [ -f assets/icon.png ]; then
-            mkdir -p icon.iconset
-            for sz in 16 32 64 128 256 512; do
-              sips -z $sz $sz assets/icon.png --out icon.iconset/icon_${sz}x${sz}.png 2>/dev/null || true
+            mkdir -p /tmp/icon.iconset
+            for sz in 16 32 128 256 512; do
+              sips -z $sz $sz assets/icon.png --out /tmp/icon.iconset/icon_${sz}x${sz}.png 2>/dev/null || true
             done
-            cp icon.iconset/icon_32x32.png icon.iconset/icon_16x16@2x.png 2>/dev/null || true
-            cp icon.iconset/icon_64x64.png icon.iconset/icon_32x32@2x.png 2>/dev/null || true
-            cp icon.iconset/icon_256x256.png icon.iconset/icon_128x128@2x.png 2>/dev/null || true
-            cp icon.iconset/icon_512x512.png icon.iconset/icon_256x256@2x.png 2>/dev/null || true
-            cp icon.iconset/icon_512x512.png icon.iconset/icon_512x512@2x.png 2>/dev/null || true
-            rm -f icon.iconset/icon_64x64.png
-            iconutil -c icns icon.iconset -o "$APP_DIR/Contents/Resources/icon.icns" 2>/dev/null || true
-            rm -rf icon.iconset
+            cp /tmp/icon.iconset/icon_32x32.png /tmp/icon.iconset/icon_16x16@2x.png 2>/dev/null || true
+            cp /tmp/icon.iconset/icon_256x256.png /tmp/icon.iconset/icon_128x128@2x.png 2>/dev/null || true
+            cp /tmp/icon.iconset/icon_512x512.png /tmp/icon.iconset/icon_256x256@2x.png 2>/dev/null || true
+            cp /tmp/icon.iconset/icon_512x512.png /tmp/icon.iconset/icon_512x512@2x.png 2>/dev/null || true
+            iconutil -c icns /tmp/icon.iconset -o "$APP/Contents/Resources/icon.icns" 2>/dev/null || true
           fi
+          mkdir -p dist/dmg && cp -r dist/NeoShell.app dist/dmg/ && ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname NeoShell -srcfolder dist/dmg -ov -format UDZO "dist/NeoShell-${VERSION}-macos-${ARCH}.dmg"
 
-          # DMG
-          mkdir -p dist/dmg
-          cp -r dist/NeoShell.app dist/dmg/
-          ln -s /Applications dist/dmg/Applications
-          hdiutil create -volname "NeoShell" -srcfolder dist/dmg \
-            -ov -format UDZO "dist/NeoShell-${VERSION}-macos-${ARCH}.dmg"
-          rm -rf dist/dmg
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: macos-${{ matrix.target }}
-          path: dist/*.dmg
+          files: dist/*.dmg
 
   build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libssh2-1-dev libssl-dev pkg-config \
@@ -110,20 +91,15 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      - name: Create AppImage
+      - name: Package AppImage
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          ARCH=x86_64
-          APP_DIR="dist/NeoShell.AppDir"
-          mkdir -p "$APP_DIR/usr/bin"
-          mkdir -p "$APP_DIR/usr/share/applications"
-          mkdir -p "$APP_DIR/usr/share/icons/hicolor/256x256/apps"
-
-          cp target/release/neoshell "$APP_DIR/usr/bin/"
-          cp assets/icon.png "$APP_DIR/usr/share/icons/hicolor/256x256/apps/neoshell.png"
-          cp assets/icon.png "$APP_DIR/neoshell.png"
-
-          cat > "$APP_DIR/neoshell.desktop" << 'DESKTOP'
+          APP="dist/NeoShell.AppDir"
+          mkdir -p "$APP/usr/bin" "$APP/usr/share/applications" "$APP/usr/share/icons/hicolor/256x256/apps"
+          cp target/release/neoshell "$APP/usr/bin/"
+          cp assets/icon.png "$APP/neoshell.png"
+          cp assets/icon.png "$APP/usr/share/icons/hicolor/256x256/apps/neoshell.png"
+          cat > "$APP/neoshell.desktop" <<'EOF'
           [Desktop Entry]
           Name=NeoShell
           Comment=Cross-Platform SSH Manager
@@ -131,34 +107,26 @@ jobs:
           Icon=neoshell
           Terminal=false
           Type=Application
-          Categories=System;TerminalEmulator;Network;
-          DESKTOP
-          cp "$APP_DIR/neoshell.desktop" "$APP_DIR/usr/share/applications/"
-
-          cat > "$APP_DIR/AppRun" << 'APPRUN'
-          #!/bin/bash
-          SELF=$(readlink -f "$0")
-          HERE=${SELF%/*}
-          exec "${HERE}/usr/bin/neoshell" "$@"
-          APPRUN
-          chmod +x "$APP_DIR/AppRun"
-
+          Categories=System;Network;
+          EOF
+          cp "$APP/neoshell.desktop" "$APP/usr/share/applications/"
+          printf '#!/bin/bash\nHERE=$(dirname "$(readlink -f "$0")")\nexec "$HERE/usr/bin/neoshell" "$@"\n' > "$APP/AppRun"
+          chmod +x "$APP/AppRun"
           wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" -O appimagetool
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$APP_DIR" "dist/NeoShell-${VERSION}-linux-${ARCH}.AppImage"
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$APP" "dist/NeoShell-${VERSION}-linux-x86_64.AppImage"
 
       - name: Fallback tar.gz
         if: failure()
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          tar -czf "dist/NeoShell-${VERSION}-linux-x86_64.tar.gz" -C target/release neoshell
+          mkdir -p dist && tar -czf "dist/NeoShell-${VERSION}-linux-x86_64.tar.gz" -C target/release neoshell
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload to Release
         if: always()
+        uses: softprops/action-gh-release@v2
         with:
-          name: linux-x86_64
-          path: |
+          files: |
             dist/*.AppImage
             dist/*.tar.gz
 
@@ -166,21 +134,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup vcpkg cache
-        uses: actions/cache@v4
-        with:
-          path: C:\vcpkg\installed
-          key: vcpkg-windows-x64-${{ hashFiles('Cargo.lock') }}
-          restore-keys: vcpkg-windows-x64-
-
-      - name: Install vcpkg dependencies
+      - name: Install vcpkg deps
         run: |
           vcpkg install libssh2:x64-windows-static-md openssl:x64-windows-static-md
-        timeout-minutes: 15
+        timeout-minutes: 20
 
       - name: Build release
         env:
@@ -188,44 +147,15 @@ jobs:
           VCPKGRS_DYNAMIC: "0"
         run: cargo build --release
 
-      - name: Package
+      - name: Package zip
         run: |
           $VERSION = "${{ github.ref_name }}".TrimStart("v")
-          New-Item -ItemType Directory -Force -Path dist
-          New-Item -ItemType Directory -Force -Path "dist\NeoShell"
-          Copy-Item "target\release\neoshell.exe" "dist\NeoShell\"
-          Copy-Item "assets\icon.png" "dist\NeoShell\"
-          Compress-Archive -Path "dist\NeoShell\*" -DestinationPath "dist\NeoShell-$VERSION-windows-x64.zip"
+          New-Item -ItemType Directory -Force -Path dist,dist\NeoShell
+          Copy-Item target\release\neoshell.exe dist\NeoShell\
+          Copy-Item assets\icon.png dist\NeoShell\
+          Compress-Archive -Path dist\NeoShell\* -DestinationPath "dist\NeoShell-$VERSION-windows-x64.zip"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-x64
-          path: dist/*.zip
-
-  release:
-    needs: [build-macos, build-linux, build-windows]
-    if: always() && !cancelled()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: List artifacts
-        run: find artifacts -type f 2>/dev/null; ls -la artifacts/ 2>/dev/null || true
-
-      - name: Create Release
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/**/*.dmg
-            artifacts/**/*.AppImage
-            artifacts/**/*.tar.gz
-            artifacts/**/*.zip
-            artifacts/**/*.msi
-          generate_release_notes: true
-          draft: false
-          prerelease: false
+          files: dist/*.zip
