@@ -1421,7 +1421,11 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::done(Message::ChangeDir(sid, path))
         }
         Message::SzDetected(sid) => {
-            // Use captured filename from "sz filename" command
+            // Prevent duplicate: skip if already downloading
+            if state.transfer_progress.is_some() {
+                return Task::none();
+            }
+
             let filename = state.sz_filename.remove(&sid);
             let current_dir = state.current_dir.get(&sid).cloned().unwrap_or("~".to_string());
 
@@ -1431,42 +1435,32 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                 } else {
                     format!("{}/{}", current_dir.trim_end_matches('/'), fname)
                 };
-                // Auto-download via SFTP
+
+                // Download directly to Downloads folder (no dialog — instant start)
+                let default_dir = dirs::download_dir()
+                    .or_else(|| dirs::desktop_dir())
+                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
+                let local_path = default_dir.join(&fname).to_string_lossy().to_string();
+
                 let ssh = state.ssh_manager.clone();
                 let progress = Arc::new(TransferProgress::new());
                 state.transfer_progress = Some(progress.clone());
 
                 if let Some(tab) = state.tabs.iter().find(|t| t.session_id == sid) {
                     tab.terminal.lock().write(
-                        format!("\r\n\x1b[36m[NeoShell] sz: downloading {} via SFTP...\x1b[0m\r\n", fname).as_bytes(),
+                        format!("\r\n\x1b[32m[NeoShell] sz: downloading {} → {}\x1b[0m\r\n", fname, local_path).as_bytes(),
                     );
                 }
 
                 Task::perform(
                     async move {
-                        let default_dir = dirs::download_dir()
-                            .or_else(dirs::desktop_dir)
-                            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
-                        let save_path = rfd::AsyncFileDialog::new()
-                            .set_title(&format!("Save: {}", fname))
-                            .set_file_name(&fname)
-                            .set_directory(&default_dir)
-                            .save_file()
-                            .await;
-
-                        if let Some(save_handle) = save_path {
-                            let local_path = save_handle.path().to_string_lossy().to_string();
-                            tokio::task::spawn_blocking(move || {
-                                ssh.download_file_with_progress(&sid, &remote_path, &local_path, progress)
-                                    .map(|_| format!("Downloaded to {}", local_path))
-                            }).await.map_err(|e| format!("{}", e))?
-                        } else {
-                            Err("cancelled".to_string())
-                        }
+                        tokio::task::spawn_blocking(move || {
+                            ssh.download_file_with_progress(&sid, &remote_path, &local_path, progress)
+                                .map(|_| format!("Downloaded to {}", local_path))
+                        }).await.map_err(|e| format!("{}", e))?
                     },
                     |result: Result<String, String>| match result {
-                        Ok(_) => Message::DownloadComplete("sz download done".to_string()),
-                        Err(e) if e == "cancelled" => Message::None,
+                        Ok(msg) => Message::DownloadComplete(msg),
                         Err(e) => Message::Error(e),
                     },
                 )
