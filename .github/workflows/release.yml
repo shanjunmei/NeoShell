@@ -142,15 +142,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install vcpkg deps
-        run: |
-          vcpkg install libssh2:x64-windows-static-md openssl:x64-windows-static-md
-        timeout-minutes: 20
+      - name: Install NASM (for openssl vendored build)
+        uses: ilammy/setup-nasm@v1
 
       - name: Build release
         env:
-          VCPKG_ROOT: C:\vcpkg
-          VCPKGRS_DYNAMIC: "0"
+          OPENSSL_STATIC: "1"
         run: cargo build --release
 
       - name: Package zip
