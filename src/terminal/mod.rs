@@ -177,6 +177,7 @@ pub struct TerminalGrid {
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub cursor_visible: bool,
+    pub generation: u64,
     style: CellStyle,
     saved_cursor: Option<(usize, usize)>,
     scroll_top: usize,
@@ -196,6 +197,7 @@ impl TerminalGrid {
             cursor_x: 0,
             cursor_y: 0,
             cursor_visible: true,
+            generation: 0,
             style: CellStyle::default(),
             saved_cursor: None,
             scroll_top: 0,
@@ -211,6 +213,7 @@ impl TerminalGrid {
         for &byte in data {
             parser.advance(self, byte);
         }
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Resize the terminal grid, preserving content where possible.

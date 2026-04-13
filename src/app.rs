@@ -2217,37 +2217,90 @@ impl<Message> canvas::Program<Message> for TerminalView {
         // Background fill
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), theme::BG_PRIMARY);
 
-        // Draw each cell
+        // Draw cells as batched text runs — consecutive same-styled characters
+        // are drawn as a single string, reducing draw calls from ~1920 to ~24-100.
         for y in 0..grid.rows {
-            for x in 0..grid.cols {
+            let mut x = 0;
+            while x < grid.cols {
                 let cell = &grid.cells[y][x];
-                if cell.c != ' ' && cell.c != '\0' {
-                    // Cell background (if non-default)
-                    let bg = cell_color_to_iced(cell.style.bg);
-                    if bg != theme::BG_PRIMARY {
+
+                // Skip empty cells with default background
+                if (cell.c == ' ' || cell.c == '\0')
+                    && cell.style.bg.r == 26
+                    && cell.style.bg.g == 27
+                    && cell.style.bg.b == 46
+                {
+                    x += 1;
+                    continue;
+                }
+
+                // Start a run of same-styled characters
+                let run_fg = cell.style.fg;
+                let run_bg = cell.style.bg;
+                let run_bold = cell.style.bold;
+                let run_inverse = cell.style.inverse;
+                let start_x = x;
+                let mut run = String::new();
+
+                while x < grid.cols {
+                    let c = &grid.cells[y][x];
+                    // Space/null with same bg can be included in run
+                    if (c.c == ' ' || c.c == '\0')
+                        && c.style.bg == run_bg
+                        && !run_inverse
+                        && !c.style.inverse
+                    {
+                        run.push(' ');
+                        x += 1;
+                        continue;
+                    }
+                    // Style changed — end this run
+                    if c.style.fg != run_fg
+                        || c.style.bg != run_bg
+                        || c.style.bold != run_bold
+                        || c.style.inverse != run_inverse
+                    {
+                        break;
+                    }
+                    run.push(c.c);
+                    x += 1;
+                }
+
+                // Trim trailing spaces for the text draw
+                let trimmed = run.trim_end();
+                if trimmed.is_empty() {
+                    // Only spaces — still draw bg if non-default
+                    let bg_color = cell_color_to_iced(if run_inverse { run_fg } else { run_bg });
+                    if bg_color != theme::BG_PRIMARY {
                         frame.fill_rectangle(
-                            Point::new(x as f32 * cell_w, y as f32 * cell_h),
-                            Size::new(cell_w, cell_h),
-                            bg,
+                            Point::new(start_x as f32 * cell_w, y as f32 * cell_h),
+                            Size::new(run.len() as f32 * cell_w, cell_h),
+                            bg_color,
                         );
                     }
-
-                    // Foreground text
-                    let fg = if cell.style.inverse {
-                        cell_color_to_iced(cell.style.bg)
-                    } else {
-                        cell_color_to_iced(cell.style.fg)
-                    };
-
-                    frame.fill_text(canvas::Text {
-                        content: cell.c.to_string(),
-                        position: Point::new(x as f32 * cell_w, y as f32 * cell_h),
-                        color: fg,
-                        size: Pixels(font_size),
-                        font: Font::MONOSPACE,
-                        ..canvas::Text::default()
-                    });
+                    continue;
                 }
+
+                // Draw background for the entire run if non-default
+                let bg_color = cell_color_to_iced(if run_inverse { run_fg } else { run_bg });
+                if bg_color != theme::BG_PRIMARY {
+                    frame.fill_rectangle(
+                        Point::new(start_x as f32 * cell_w, y as f32 * cell_h),
+                        Size::new(run.len() as f32 * cell_w, cell_h),
+                        bg_color,
+                    );
+                }
+
+                // Draw the text run as a single string
+                let fg_color = cell_color_to_iced(if run_inverse { run_bg } else { run_fg });
+                frame.fill_text(canvas::Text {
+                    content: trimmed.to_string(),
+                    position: Point::new(start_x as f32 * cell_w, y as f32 * cell_h),
+                    color: fg_color,
+                    size: Pixels(font_size),
+                    font: Font::MONOSPACE,
+                    ..canvas::Text::default()
+                });
             }
         }
 

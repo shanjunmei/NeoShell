@@ -428,36 +428,45 @@ impl SshManager {
 
     /// Send raw bytes to the remote shell.
     pub fn write(&self, session_id: &str, data: &[u8]) -> Result<(), String> {
-        let sessions = self.sessions.read();
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
-        session
-            .writer
+        let writer = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .writer.clone()
+        };
+        // sessions read lock dropped
+        writer
             .try_send(SshCommand::Write(data.to_vec()))
             .map_err(|e| format!("Failed to send write command: {}", e))
     }
 
     /// Request a PTY resize on the remote end.
     pub fn resize(&self, session_id: &str, cols: u32, rows: u32) -> Result<(), String> {
-        let sessions = self.sessions.read();
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
-        session
-            .writer
+        let writer = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .writer.clone()
+        };
+        // sessions read lock dropped
+        writer
             .try_send(SshCommand::Resize(cols, rows))
             .map_err(|e| format!("Failed to send resize command: {}", e))
     }
 
     /// Disconnect a session.
     pub fn disconnect(&self, session_id: &str) -> Result<(), String> {
-        let sessions = self.sessions.read();
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
-        let _ = session.writer.try_send(SshCommand::Disconnect);
-        drop(sessions);
+        let writer = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .writer.clone()
+        };
+        // sessions read lock dropped before sending command and taking write lock
+        let _ = writer.try_send(SshCommand::Disconnect);
         self.sessions.write().remove(session_id);
         Ok(())
     }
@@ -471,12 +480,16 @@ impl SshManager {
     /// Uses a completely independent SSH connection — no contention with the
     /// interactive shell session.
     pub fn exec_command(&self, session_id: &str, command: &str) -> Result<String, String> {
-        let sessions = self.sessions.read();
-        let ssh_session = sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+        let exec_session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .exec_session.clone()
+        };
+        // sessions read lock dropped — other operations can proceed
 
-        let sess = ssh_session.exec_session.lock();
+        let sess = exec_session.lock();
         sess.set_blocking(true);
 
         let mut channel = sess
@@ -685,11 +698,15 @@ impl SshManager {
 
     /// Download a remote file to a local path using SFTP.
     pub fn download_file(&self, session_id: &str, remote_path: &str, local_path: &str) -> Result<(), String> {
-        let sessions = self.sessions.read();
-        let ssh_session = sessions.get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+        let exec_session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .exec_session.clone()
+        };
+        // sessions read lock dropped
 
-        let sess = ssh_session.exec_session.lock();
+        let sess = exec_session.lock();
         sess.set_blocking(true);
 
         let sftp = sess.sftp()
@@ -710,11 +727,15 @@ impl SshManager {
 
     /// Upload a local file to a remote path using SFTP.
     pub fn upload_file(&self, session_id: &str, local_path: &str, remote_path: &str) -> Result<(), String> {
-        let sessions = self.sessions.read();
-        let ssh_session = sessions.get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+        let exec_session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .exec_session.clone()
+        };
+        // sessions read lock dropped
 
-        let sess = ssh_session.exec_session.lock();
+        let sess = exec_session.lock();
         sess.set_blocking(true);
 
         let contents = std::fs::read(local_path)
@@ -740,10 +761,14 @@ impl SshManager {
         remote_path: &str,
         progress: Arc<TransferProgress>,
     ) -> Result<(), String> {
-        let sessions = self.sessions.read();
-        let ssh_session = sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+        let exec_session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .exec_session.clone()
+        };
+        // sessions read lock dropped
 
         let contents = std::fs::read(local_path)
             .map_err(|e| format!("Failed to read local file: {}", e))?;
@@ -758,7 +783,7 @@ impl SshManager {
         progress.transferred.store(0, Ordering::Relaxed);
         progress.finished.store(false, Ordering::Relaxed);
 
-        let sess = ssh_session.exec_session.lock();
+        let sess = exec_session.lock();
         sess.set_blocking(true);
         let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
         let mut remote_file = sftp
@@ -788,10 +813,14 @@ impl SshManager {
         local_path: &str,
         progress: Arc<TransferProgress>,
     ) -> Result<(), String> {
-        let sessions = self.sessions.read();
-        let ssh_session = sessions
-            .get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+        let exec_session = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .exec_session.clone()
+        };
+        // sessions read lock dropped
 
         let filename = std::path::Path::new(remote_path)
             .file_name()
@@ -802,7 +831,7 @@ impl SshManager {
         progress.transferred.store(0, Ordering::Relaxed);
         progress.finished.store(false, Ordering::Relaxed);
 
-        let sess = ssh_session.exec_session.lock();
+        let sess = exec_session.lock();
         sess.set_blocking(true);
         let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
 
@@ -841,11 +870,15 @@ impl SshManager {
 
     /// Read a remote file's content as a string (for editing).
     pub fn read_file_content(&self, session_id: &str, remote_path: &str) -> Result<String, String> {
-        let sessions = self.sessions.read();
-        let ssh_session = sessions.get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+        let exec_session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .exec_session.clone()
+        };
+        // sessions read lock dropped
 
-        let sess = ssh_session.exec_session.lock();
+        let sess = exec_session.lock();
         sess.set_blocking(true);
 
         let sftp = sess.sftp()
@@ -863,11 +896,15 @@ impl SshManager {
 
     /// Write content to a remote file (for saving edits).
     pub fn write_file_content(&self, session_id: &str, remote_path: &str, content: &str) -> Result<(), String> {
-        let sessions = self.sessions.read();
-        let ssh_session = sessions.get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+        let exec_session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id)
+                .ok_or_else(|| format!("Session '{}' not found", session_id))?
+                .exec_session.clone()
+        };
+        // sessions read lock dropped
 
-        let sess = ssh_session.exec_session.lock();
+        let sess = exec_session.lock();
         sess.set_blocking(true);
 
         let sftp = sess.sftp()
