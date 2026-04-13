@@ -330,11 +330,18 @@ impl SshManager {
             .request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
             .map_err(|e| format!("PTY request failed: {}", e))?;
 
+        // Set UTF-8 locale (ignore errors — server may reject setenv)
+        let _ = channel.setenv("LANG", "en_US.UTF-8");
+        let _ = channel.setenv("LC_ALL", "en_US.UTF-8");
+        let _ = channel.setenv("TERM", "xterm-256color");
+
         match &mode {
             SessionMode::Persistent(name) => {
                 // Create or attach to persistent tmux session with hidden UI
+                // Force UTF-8 via environment in the exec command
                 let cmd = format!(
-                    "tmux has-session -t {n} 2>/dev/null && tmux attach-session -t {n} || \
+                    "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TERM=xterm-256color; \
+                     tmux has-session -t {n} 2>/dev/null && tmux attach-session -t {n} || \
                      (tmux new-session -d -s {n} -x 80 -y 24 2>/dev/null && \
                       tmux set-option -t {n} status off 2>/dev/null && \
                       tmux attach-session -t {n}) || exec $SHELL -l",
@@ -1198,11 +1205,14 @@ fn reconnect_ssh(
         .request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
         .map_err(|e| format!("PTY failed: {}", e))?;
 
+    let _ = channel.setenv("LANG", "en_US.UTF-8");
+    let _ = channel.setenv("LC_ALL", "en_US.UTF-8");
+
     match mode {
         SessionMode::Persistent(name) => {
-            // Reattach to existing tmux session (it survived the disconnect)
             let cmd = format!(
-                "tmux attach-session -t {} 2>/dev/null || exec $SHELL -l",
+                "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; \
+                 tmux attach-session -t {} 2>/dev/null || exec $SHELL -l",
                 name
             );
             channel

@@ -2364,20 +2364,48 @@ fn key_to_terminal_bytes(key: &keyboard::Key, modifiers: &keyboard::Modifiers) -
     match key {
         Key::Character(c) => {
             let s = c.as_str();
-            if modifiers.control() && s.len() == 1 {
-                // Ctrl+letter -> send control character (0x01..0x1A)
-                let ch = s.chars().next()?;
-                if ch.is_ascii_alphabetic() {
-                    let ctrl_byte = (ch.to_ascii_uppercase() as u8) - b'A' + 1;
-                    return Some(String::from(ctrl_byte as char));
+
+            // macOS: Cmd+C = copy, Cmd+V = paste (handled by OS, skip)
+            if modifiers.command() {
+                return None;
+            }
+
+            // Ctrl+letter → control character (0x01..0x1A)
+            if modifiers.control() {
+                if let Some(ch) = s.chars().next() {
+                    if ch.is_ascii_alphabetic() {
+                        let ctrl_byte = (ch.to_ascii_uppercase() as u8) - b'A' + 1;
+                        return Some(String::from(ctrl_byte as char));
+                    }
+                    // Ctrl+[ = ESC, Ctrl+] = 0x1D, Ctrl+\ = 0x1C
+                    return match ch {
+                        '[' => Some("\x1b".to_string()),
+                        '\\' => Some("\x1c".to_string()),
+                        ']' => Some("\x1d".to_string()),
+                        '2' | '@' => Some("\x00".to_string()), // Ctrl+2/@ = NUL
+                        '6' | '^' => Some("\x1e".to_string()), // Ctrl+6/^ = RS
+                        _ => None,
+                    };
                 }
             }
+
+            // Alt/Option+key → ESC prefix (meta key)
+            if modifiers.alt() {
+                return Some(format!("\x1b{}", s));
+            }
+
             Some(s.to_string())
         }
         Key::Named(named) => {
+            // Cmd+named key — skip (OS handles)
+            if modifiers.command() {
+                return None;
+            }
+
             let seq = match named {
                 Named::Enter => "\r",
                 Named::Backspace => "\x7f",
+                Named::Tab if modifiers.shift() => return Some("\x1b[Z".to_string()), // Shift+Tab
                 Named::Tab => "\t",
                 Named::Escape => "\x1b",
                 Named::ArrowUp => "\x1b[A",
