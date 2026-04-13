@@ -363,20 +363,37 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ConnectTo(id) => {
-            // Debounce: prevent double-click creating duplicate during async handshake
             if state.connecting_ids.contains(&id) {
                 return Task::none();
             }
             state.connecting_ids.insert(id.clone());
+            state.show_connect_dialog = false;
+
+            // Create a placeholder tab immediately so user sees feedback
+            let tab_id = uuid::Uuid::new_v4().to_string();
+            let terminal = Arc::new(parking_lot::Mutex::new(TerminalGrid::new(80, 24)));
+            {
+                let mut grid = terminal.lock();
+                grid.write(b"\x1b[33mConnecting...\x1b[0m\r\n");
+            }
+            state.tabs.push(TerminalTab {
+                id: tab_id.clone(),
+                session_id: String::new(), // placeholder
+                connection_id: id.clone(),
+                title: "Connecting...".to_string(),
+                terminal,
+            });
+            state.active_tab = Some(state.tabs.len() - 1);
+
             let store = state.store.clone();
             let ssh = state.ssh_manager.clone();
-            let tab_id = uuid::Uuid::new_v4().to_string();
+            let tab_id2 = tab_id.clone();
             Task::perform(
                 async move {
                     let config = store.get_connection(&id)?;
                     let session_id = ssh.connect_config(&config)?;
                     let title = format!("{}@{}:{}", config.username, config.host, config.port);
-                    Ok((tab_id, session_id, title, id))
+                    Ok((tab_id2, session_id, title, id))
                 },
                 |result: Result<(String, String, String, String), String>| match result {
                     Ok((tab_id, session_id, title, conn_id)) => {
@@ -558,18 +575,19 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         Message::SshConnected(tab_id, session_id, title, connection_id) => {
             state.connecting_ids.remove(&connection_id);
             state.show_connect_dialog = false;
-            let terminal = Arc::new(parking_lot::Mutex::new(TerminalGrid::new(80, 24)));
             let sid_for_fetch = session_id.clone();
-            state.tabs.push(TerminalTab {
-                id: tab_id,
-                session_id,
-                connection_id,
-                title,
-                terminal,
-            });
-            state.active_tab = Some(state.tabs.len() - 1);
+
+            // Update existing placeholder tab (created in ConnectTo)
+            if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.session_id = session_id;
+                tab.connection_id = connection_id;
+                tab.title = title;
+                // Clear the "Connecting..." message
+                let mut grid = tab.terminal.lock();
+                grid.write(b"\x1b[2J\x1b[H"); // Clear screen + home
+            }
+
             state.current_dir.insert(sid_for_fetch.clone(), "~".to_string());
-            // Trigger initial file listing
             Task::done(Message::ChangeDir(sid_for_fetch, "~".to_string()))
         }
         Message::SshData(session_id, data) => {
@@ -1067,6 +1085,15 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         Message::Tick => Task::none(),
         Message::None => Task::none(),
         Message::Error(e) => {
+            // Remove any placeholder "Connecting..." tabs
+            state.tabs.retain(|t| !t.session_id.is_empty());
+            if state.tabs.is_empty() {
+                state.active_tab = None;
+            } else if let Some(idx) = state.active_tab {
+                if idx >= state.tabs.len() {
+                    state.active_tab = Some(state.tabs.len().saturating_sub(1));
+                }
+            }
             state.error_message = e;
             state.transfer_progress = None;
             state.connecting_ids.clear();
