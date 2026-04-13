@@ -17,6 +17,32 @@ use crate::storage::{ConnectionConfig, ConnectionInfo, ConnectionStore};
 use crate::terminal::TerminalGrid;
 use crate::ui::theme;
 
+/// System CJK font for rendering Chinese/Japanese/Korean characters.
+/// iced canvas doesn't do font fallback, so we must specify explicitly.
+#[cfg(target_os = "macos")]
+const CJK_FONT: Font = Font {
+    family: iced::font::Family::Name("PingFang SC"),
+    weight: iced::font::Weight::Normal,
+    stretch: iced::font::Stretch::Normal,
+    style: iced::font::Style::Normal,
+};
+
+#[cfg(target_os = "windows")]
+const CJK_FONT: Font = Font {
+    family: iced::font::Family::Name("Microsoft YaHei"),
+    weight: iced::font::Weight::Normal,
+    stretch: iced::font::Stretch::Normal,
+    style: iced::font::Style::Normal,
+};
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const CJK_FONT: Font = Font {
+    family: iced::font::Family::Name("Noto Sans CJK SC"),
+    weight: iced::font::Weight::Normal,
+    stretch: iced::font::Stretch::Normal,
+    style: iced::font::Style::Normal,
+};
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -2307,8 +2333,7 @@ impl<Message> canvas::Program<Message> for TerminalView {
                 // Draw character
                 if cell.c != ' ' && cell.c != '\0' {
                     let (char_font, char_size, x_offset) = if cell.wide {
-                        // CJK: use system font with CJK glyphs, sized to fill 2 cells
-                        (Font::DEFAULT, Pixels(font_size * 1.35), cell_w * 0.15)
+                        (CJK_FONT, Pixels(font_size * 1.3), cell_w * 0.1)
                     } else {
                         (Font::MONOSPACE, Pixels(font_size), 0.0)
                     };
