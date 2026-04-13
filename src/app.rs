@@ -2611,51 +2611,49 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
     let mut file_col = column![].spacing(0);
 
     if let Some(entries) = entries {
-        // Always add a parent directory entry first
-        let parent_sid = sid.clone();
+        // Build unified file entries (including ".." parent)
+        let mut all_entries: Vec<&FileEntry> = Vec::new();
+        // Create a static parent entry
         let parent_entry = FileEntry {
             name: "..".to_string(),
             is_dir: true,
             size: String::new(),
             permissions: String::new(),
-            modified: "(parent)".to_string(),
+            modified: String::new(),
             owner: String::new(),
         };
-        let parent_btn = button(
-            text("  ..  (parent)")
-                .color(theme::ACCENT)
-                .size(11)
-                ,
-        )
-        .on_press(Message::FileClicked(parent_sid, parent_entry))
-        .padding(Padding::from([3, 10]))
-        .width(Fill)
-        .style(sidebar_item_style);
-        file_col = file_col.push(parent_btn);
+        all_entries.push(&parent_entry);
+        for e in entries.iter().filter(|e| e.name != "..") {
+            all_entries.push(e);
+        }
 
-        for entry in entries.iter().filter(|e| e.name != "..") {
-            let icon = if entry.is_dir { "D" } else { "F" };
-            let name_color = if entry.is_dir {
-                theme::ACCENT
+        for entry in &all_entries {
+            let (icon, name_color) = if entry.name == ".." {
+                ("..", theme::ACCENT)
+            } else if entry.is_dir {
+                ("D", theme::ACCENT)
             } else {
-                theme::TEXT_PRIMARY
+                ("F", theme::TEXT_PRIMARY)
             };
 
-            let name_text = text(format!("{} {}", icon, truncate_str(&entry.name, 22)))
-                .color(name_color)
-                .size(11);
-            let human_size = humanize_file_size(&entry.size);
-            let size_text = text(human_size)
-                .color(theme::TEXT_MUTED)
-                .size(10);
-            let date_text = text(&entry.modified)
-                .color(theme::TEXT_MUTED)
-                .size(10);
+            let display_name = if entry.name == ".." {
+                "..".to_string()
+            } else {
+                format!("{} {}", icon, truncate_str(&entry.name, 22))
+            };
 
+            let human_size = if entry.size.is_empty() { "-".to_string() } else { humanize_file_size(&entry.size) };
+            let date_str = if entry.modified.is_empty() { "".to_string() } else { entry.modified.clone() };
+
+            // Unified row: name(fill) | size(right, 80px) | date(right, 110px)
             let mut entry_row = row![
-                container(name_text).width(Fill),
-                container(size_text).width(70),
-                container(date_text).width(100),
+                container(text(display_name).color(name_color).size(11)).width(Fill),
+                container(
+                    text(human_size).color(theme::TEXT_MUTED).size(10)
+                ).width(80).align_x(alignment::Horizontal::Right),
+                container(
+                    text(date_str).color(theme::TEXT_MUTED).size(10)
+                ).width(110).align_x(alignment::Horizontal::Right),
             ]
             .spacing(4)
             .align_y(alignment::Vertical::Center);
@@ -2685,7 +2683,7 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
             // Unified row: directories are clickable buttons, files are containers
             // Both use identical padding and width for alignment
             if entry.is_dir {
-                let entry_clone = entry.clone();
+                let entry_clone = (*entry).clone();
                 let sid_clone = sid.clone();
                 file_col = file_col.push(
                     button(entry_row)
