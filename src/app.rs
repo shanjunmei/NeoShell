@@ -432,6 +432,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         // ---- form ------------------------------------------------------------
         Message::ShowForm(maybe_id) => {
             state.show_form = true;
+            state.show_connect_dialog = false;
             if let Some(id) = maybe_id.clone() {
                 state.edit_id = Some(id.clone());
                 if let Some(info) = state.connections.iter().find(|c| c.id == id) {
