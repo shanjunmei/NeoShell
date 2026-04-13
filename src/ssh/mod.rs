@@ -70,8 +70,10 @@ pub struct SshSession {
     /// Channel for sending commands (write, resize, disconnect) into the
     /// session's background thread.
     pub writer: tokio::sync::mpsc::Sender<SshCommand>,
-    /// Shared SSH session handle for opening exec channels.
-    pub session: Arc<Mutex<Session>>,
+    /// SEPARATE SSH session dedicated to exec commands (monitoring, file listing).
+    /// This avoids deadlocking the interactive session — libssh2 is not thread-safe
+    /// for concurrent operations on a single session.
+    pub exec_session: Arc<Mutex<Session>>,
 }
 
 /// Manages multiple concurrent SSH sessions.
@@ -176,6 +178,41 @@ impl SshManager {
         if !session.authenticated() {
             return Err("Authentication failed".to_string());
         }
+
+        // --- Open a SECOND independent SSH connection for exec commands ----
+        // libssh2 is not thread-safe: concurrent channel operations on the
+        // same Session will deadlock.  A dedicated exec session avoids this.
+        let exec_session = {
+            let tcp2 = TcpStream::connect_timeout(
+                &addr.parse().map_err(|e| format!("Invalid address: {}", e))?,
+                Duration::from_secs(10),
+            )
+            .map_err(|e| format!("Exec TCP connect failed: {}", e))?;
+
+            let mut sess2 = Session::new()
+                .map_err(|e| format!("Failed to create exec session: {}", e))?;
+            sess2.set_tcp_stream(tcp2);
+            sess2.handshake()
+                .map_err(|e| format!("Exec SSH handshake failed: {}", e))?;
+
+            match auth_type {
+                "password" => {
+                    let pw = password.ok_or("Password required")?;
+                    sess2.userauth_password(username, pw)
+                        .map_err(|e| format!("Exec auth failed: {}", e))?;
+                }
+                "key" => {
+                    let key_path = std::path::Path::new(
+                        private_key.ok_or("Private key required")?,
+                    );
+                    sess2.userauth_pubkey_file(username, None, key_path, passphrase)
+                        .map_err(|e| format!("Exec key auth failed: {}", e))?;
+                }
+                _ => return Err(format!("Unknown auth type: {}", auth_type)),
+            }
+
+            Arc::new(Mutex::new(sess2))
+        };
 
         // --- Open channel, request PTY, start shell ------------------------
         let mut channel = session
@@ -322,7 +359,7 @@ impl SshManager {
             session_id: session_id.clone(),
             connection_id,
             writer: cmd_tx,
-            session,
+            exec_session,
         };
 
         self.sessions.write().insert(session_id.clone(), ssh_session);
@@ -371,16 +408,16 @@ impl SshManager {
         self.sessions.read().keys().cloned().collect()
     }
 
-    /// Execute a single command on the SSH session and return stdout.
-    /// Opens a new exec channel (separate from the interactive shell).
+    /// Execute a single command via the dedicated exec session and return stdout.
+    /// Uses a completely independent SSH connection — no contention with the
+    /// interactive shell session.
     pub fn exec_command(&self, session_id: &str, command: &str) -> Result<String, String> {
         let sessions = self.sessions.read();
         let ssh_session = sessions
             .get(session_id)
             .ok_or_else(|| format!("Session '{}' not found", session_id))?;
 
-        let sess = ssh_session.session.lock();
-        // Must be blocking for exec
+        let sess = ssh_session.exec_session.lock();
         sess.set_blocking(true);
 
         let mut channel = sess
@@ -394,12 +431,7 @@ impl SshManager {
         channel
             .read_to_string(&mut output)
             .map_err(|e| format!("Failed to read command output: {}", e))?;
-        channel
-            .wait_close()
-            .map_err(|e| format!("Channel close error: {}", e))?;
-
-        // Restore non-blocking for the interactive session
-        sess.set_blocking(false);
+        let _ = channel.wait_close();
 
         Ok(output)
     }

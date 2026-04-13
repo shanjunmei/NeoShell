@@ -68,6 +68,7 @@ enum Screen {
 struct TerminalTab {
     id: String,
     session_id: String,
+    connection_id: String,
     title: String,
     terminal: Arc<parking_lot::Mutex<TerminalGrid>>,
 }
@@ -120,7 +121,7 @@ pub enum Message {
     SaveForm,
 
     // Terminal
-    SshConnected(String, String, String),
+    SshConnected(String, String, String, String),  // tab_id, session_id, title, connection_id
     SshData(String, Vec<u8>),
     SshClosed(String),
     TerminalInput(String, String),
@@ -278,6 +279,14 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ConnectTo(id) => {
+            // Prevent duplicate connections to the same server
+            if state.tabs.iter().any(|t| t.connection_id == id) {
+                // Already connected — just switch to existing tab
+                if let Some(idx) = state.tabs.iter().position(|t| t.connection_id == id) {
+                    state.active_tab = Some(idx);
+                }
+                return Task::none();
+            }
             let store = state.store.clone();
             let ssh = state.ssh_manager.clone();
             let tab_id = uuid::Uuid::new_v4().to_string();
@@ -286,11 +295,11 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                     let config = store.get_connection(&id)?;
                     let session_id = ssh.connect_config(&config)?;
                     let title = format!("{}@{}:{}", config.username, config.host, config.port);
-                    Ok((tab_id, session_id, title))
+                    Ok((tab_id, session_id, title, id))
                 },
-                |result: Result<(String, String, String), String>| match result {
-                    Ok((tab_id, session_id, title)) => {
-                        Message::SshConnected(tab_id, session_id, title)
+                |result: Result<(String, String, String, String), String>| match result {
+                    Ok((tab_id, session_id, title, conn_id)) => {
+                        Message::SshConnected(tab_id, session_id, title, conn_id)
                     }
                     Err(e) => Message::Error(e),
                 },
@@ -430,12 +439,13 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         }
 
         // ---- terminal --------------------------------------------------------
-        Message::SshConnected(tab_id, session_id, title) => {
+        Message::SshConnected(tab_id, session_id, title, connection_id) => {
             let terminal = Arc::new(parking_lot::Mutex::new(TerminalGrid::new(80, 24)));
             let sid_for_fetch = session_id.clone();
             state.tabs.push(TerminalTab {
                 id: tab_id,
                 session_id,
+                connection_id,
                 title,
                 terminal,
             });
