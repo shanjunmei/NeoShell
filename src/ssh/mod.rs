@@ -149,8 +149,6 @@ pub struct SshSession {
     pub exec_session: Arc<Mutex<Session>>,
     /// Connection parameters stored for automatic reconnection.
     pub params: ConnectParams,
-    /// tmux session name on the remote host (None if tmux unavailable).
-    pub tmux_session_name: Option<String>,
 }
 
 /// Manages multiple concurrent SSH sessions.
@@ -307,27 +305,7 @@ impl SshManager {
             Arc::new(Mutex::new(sess2))
         };
 
-        // --- Open channel, request PTY, wrap in tmux if available ----------
-        let tmux_name = format!("neo-{}", &session_id[..8]);
-
-        // Check if tmux is available on the remote host
-        let has_tmux = {
-            session.set_blocking(true);
-            let check_result = (|| -> Result<bool, String> {
-                let mut check_ch = session
-                    .channel_session()
-                    .map_err(|e| format!("Channel error: {}", e))?;
-                check_ch
-                    .exec("command -v tmux")
-                    .map_err(|e| format!("Exec error: {}", e))?;
-                let mut out = String::new();
-                let _ = check_ch.read_to_string(&mut out);
-                let _ = check_ch.wait_close();
-                Ok(!out.trim().is_empty())
-            })();
-            check_result.unwrap_or(false)
-        };
-
+        // --- Open channel, request PTY, start shell -------------------------
         let mut channel = session
             .channel_session()
             .map_err(|e| format!("Failed to open channel: {}", e))?;
@@ -336,21 +314,9 @@ impl SshManager {
             .request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
             .map_err(|e| format!("PTY request failed: {}", e))?;
 
-        let tmux_session_name = if has_tmux {
-            let cmd = format!(
-                "tmux new-session -As {} || exec $SHELL -l",
-                tmux_name
-            );
-            channel
-                .exec(&cmd)
-                .map_err(|e| format!("tmux exec failed: {}", e))?;
-            Some(tmux_name)
-        } else {
-            channel
-                .shell()
-                .map_err(|e| format!("Shell request failed: {}", e))?;
-            None
-        };
+        channel
+            .shell()
+            .map_err(|e| format!("Shell request failed: {}", e))?;
 
         // Make the session non-blocking for reading
         session.set_blocking(false);
@@ -374,7 +340,6 @@ impl SshManager {
 
         // Clone reconnection context for the reader thread.
         let reader_params = params.clone();
-        let reader_tmux = tmux_session_name.clone();
         let reader_exec = Arc::clone(&exec_session);
 
         // --- Reader thread: reads from SSH channel, emits SshEvent ---------
@@ -439,7 +404,7 @@ impl SshManager {
                     std::thread::sleep(Duration::from_millis(backoff_ms));
                     backoff_ms = (backoff_ms * 2).min(30_000);
 
-                    match reconnect_ssh(&reader_params, &reader_tmux) {
+                    match reconnect_ssh(&reader_params) {
                         Ok((new_session, new_channel, new_exec)) => {
                             // Replace channel first (writer shares this Arc)
                             {
@@ -549,7 +514,6 @@ impl SshManager {
             writer: cmd_tx,
             exec_session,
             params,
-            tmux_session_name,
         };
 
         self.sessions.write().insert(session_id.clone(), ssh_session);
@@ -1057,7 +1021,6 @@ impl SshManager {
 /// (with PTY + tmux or shell), and a fresh exec session for monitoring.
 fn reconnect_ssh(
     params: &ConnectParams,
-    tmux_name: &Option<String>,
 ) -> Result<(Session, ssh2::Channel, Session), String> {
     let addr = format!("{}:{}", params.host, params.port);
     let tcp = TcpStream::connect_timeout(
@@ -1116,19 +1079,9 @@ fn reconnect_ssh(
         .request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
         .map_err(|e| format!("PTY failed: {}", e))?;
 
-    if let Some(name) = tmux_name {
-        let cmd = format!(
-            "tmux attach-session -t {} 2>/dev/null || tmux new-session -s {}",
-            name, name
-        );
-        channel
-            .exec(&cmd)
-            .map_err(|e| format!("tmux attach failed: {}", e))?;
-    } else {
-        channel
-            .shell()
-            .map_err(|e| format!("Shell failed: {}", e))?;
-    }
+    channel
+        .shell()
+        .map_err(|e| format!("Shell failed: {}", e))?;
 
     // Set non-blocking for the reader thread
     session.set_blocking(false);
