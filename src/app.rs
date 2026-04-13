@@ -283,7 +283,7 @@ pub enum Message {
 
     // Monitor
     FetchMonitorData,
-    MonitorDataReceived(String, ServerStats, Vec<ProcessInfo>),
+    MonitorDataReceived(String, ServerStats, Vec<ProcessInfo>, String), // sid, stats, procs, cwd
     MonitorError(String),
     ShowNetworkDetail(crate::ssh::NetInterface),
     HideNetworkDetail,
@@ -1065,12 +1065,15 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                             tokio::task::spawn_blocking(move || {
                                 let stats = ssh.fetch_server_stats(&sid)?;
                                 let procs = ssh.fetch_top_processes(&sid, 15)?;
-                                Ok((sid, stats, procs))
+                                // Also get shell CWD for file browser sync
+                                let cwd = ssh.exec_command(&sid, "pwd")
+                                    .unwrap_or_default().trim().to_string();
+                                Ok((sid, stats, procs, cwd))
                             }).await.map_err(|e| format!("{}", e))?
                         },
-                        |r: Result<(String, ServerStats, Vec<ProcessInfo>), String>| match r {
-                            Ok((sid, stats, procs)) => {
-                                Message::MonitorDataReceived(sid, stats, procs)
+                        |r: Result<(String, ServerStats, Vec<ProcessInfo>, String), String>| match r {
+                            Ok((sid, stats, procs, cwd)) => {
+                                Message::MonitorDataReceived(sid, stats, procs, cwd)
                             }
                             Err(e) => Message::MonitorError(e),
                         },
@@ -1079,8 +1082,8 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::MonitorDataReceived(sid, stats, procs) => {
-            // Calculate network speed (bytes/sec) from deltas
+        Message::MonitorDataReceived(sid, stats, procs, cwd) => {
+            // Calculate network speed
             let now = std::time::Instant::now();
             if let Some(prev_time) = state.prev_net_time.get(&sid) {
                 let elapsed = now.duration_since(*prev_time).as_secs_f64();
@@ -1098,7 +1101,16 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             state.prev_net_time.insert(sid.clone(), now);
 
             state.server_stats.insert(sid.clone(), stats);
-            state.top_processes.insert(sid, procs);
+            state.top_processes.insert(sid.clone(), procs);
+
+            // Sync file browser with shell CWD
+            if !cwd.is_empty() {
+                let prev_dir = state.current_dir.get(&sid).cloned().unwrap_or_default();
+                if prev_dir != cwd {
+                    state.current_dir.insert(sid.clone(), cwd.clone());
+                    return Task::done(Message::ChangeDir(sid, cwd));
+                }
+            }
             Task::none()
         }
         Message::MonitorError(e) => {
