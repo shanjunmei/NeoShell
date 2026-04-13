@@ -145,7 +145,8 @@ pub enum Message {
 
     // Polling / keyboard
     PollSshEvents,
-    KeyboardEvent(keyboard::Key, keyboard::Modifiers),
+    KeyboardEvent(keyboard::Key, keyboard::Modifiers, Option<String>),
+    PasteClipboard,
 
     // Search
     SearchChanged(String),
@@ -619,28 +620,52 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         }
 
         // ---- keyboard -------------------------------------------------------
-        Message::KeyboardEvent(key, modifiers) => {
-            if state.screen != Screen::Main {
-                return Task::none();
+        Message::KeyboardEvent(key, modifiers, text) => {
+            if state.screen != Screen::Main { return Task::none(); }
+            if state.editor_file_path.is_some() { return Task::none(); }
+            if state.show_form { return Task::none(); }
+            if state.selected_interface.is_some() { return Task::none(); }
+
+            // Cmd+V = paste from clipboard
+            if modifiers.command() {
+                if let keyboard::Key::Character(c) = &key {
+                    if c.as_str() == "v" {
+                        return Task::done(Message::PasteClipboard);
+                    }
+                }
+                return Task::none(); // Skip other Cmd+key
             }
-            // Don't forward keys to terminal while editor is open
-            if state.editor_file_path.is_some() {
-                return Task::none();
-            }
-            // Don't send keys when form is open
-            if state.show_form {
-                return Task::none();
-            }
-            // Don't send keys when network detail popup is open
-            if state.selected_interface.is_some() {
-                return Task::none();
-            }
+
             if let Some(idx) = state.active_tab {
                 if let Some(tab) = state.tabs.get(idx) {
                     let session_id = tab.session_id.clone();
-                    if let Some(data) = key_to_terminal_bytes(&key, &modifiers) {
+                    if let Some(data) = key_to_terminal_bytes(&key, &modifiers, text.as_deref()) {
                         return Task::done(Message::TerminalInput(session_id, data));
                     }
+                }
+            }
+            Task::none()
+        }
+
+        Message::PasteClipboard => {
+            if let Some(idx) = state.active_tab {
+                if let Some(tab) = state.tabs.get(idx) {
+                    let session_id = tab.session_id.clone();
+                    let ssh = state.ssh_manager.clone();
+                    return Task::perform(
+                        async move {
+                            let mut clipboard = arboard::Clipboard::new()
+                                .map_err(|e| format!("Clipboard error: {}", e))?;
+                            let content = clipboard.get_text()
+                                .map_err(|e| format!("Clipboard read error: {}", e))?;
+                            ssh.send_data(&session_id, content.as_bytes())?;
+                            Ok(())
+                        },
+                        |r: Result<(), String>| match r {
+                            Ok(()) => Message::None,
+                            Err(e) => Message::Error(e),
+                        },
+                    );
                 }
             }
             Task::none()
@@ -907,8 +932,10 @@ fn subscription(state: &NeoShell) -> Subscription<Message> {
     if state.screen == Screen::Main && state.active_tab.is_some() {
         subs.push(event::listen().map(|evt| {
             match evt {
-                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                    Message::KeyboardEvent(key, modifiers)
+                iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key, modifiers, text, ..
+                }) => {
+                    Message::KeyboardEvent(key, modifiers, text.map(|s| s.to_string()))
                 }
                 _ => Message::None,
             }
@@ -2279,16 +2306,16 @@ impl<Message> canvas::Program<Message> for TerminalView {
 
                 // Draw character
                 if cell.c != ' ' && cell.c != '\0' {
-                    let (char_font, char_size) = if cell.wide {
-                        // CJK: use system default font which has proper CJK glyphs
-                        (Font::DEFAULT, Pixels(font_size * 1.1))
+                    let (char_font, char_size, x_offset) = if cell.wide {
+                        // CJK: use system font with CJK glyphs, sized to fill 2 cells
+                        (Font::DEFAULT, Pixels(font_size * 1.35), cell_w * 0.15)
                     } else {
-                        (Font::MONOSPACE, Pixels(font_size))
+                        (Font::MONOSPACE, Pixels(font_size), 0.0)
                     };
 
                     frame.fill_text(canvas::Text {
                         content: cell.c.to_string(),
-                        position: Point::new(x as f32 * cell_w, y as f32 * cell_h),
+                        position: Point::new(x as f32 * cell_w + x_offset, y as f32 * cell_h),
                         color: fg,
                         size: char_size,
                         font: char_font,
@@ -2325,118 +2352,108 @@ fn cell_color_to_iced(c: crate::terminal::Color) -> Color {
 // Keyboard -> terminal byte conversion
 // ---------------------------------------------------------------------------
 
-fn key_to_terminal_bytes(key: &keyboard::Key, modifiers: &keyboard::Modifiers) -> Option<String> {
+fn key_to_terminal_bytes(
+    key: &keyboard::Key,
+    modifiers: &keyboard::Modifiers,
+    text: Option<&str>,
+) -> Option<String> {
     use keyboard::key::Named;
     use keyboard::Key;
 
-    match key {
-        Key::Character(c) => {
-            let s = c.as_str();
-
-            // macOS: Cmd+C = copy, Cmd+V = paste (handled by OS, skip)
-            if modifiers.command() {
-                return None;
+    // Ctrl+letter → control character (0x01..0x1A)
+    if modifiers.control() {
+        if let Key::Character(c) = key {
+            let ch = c.as_str().chars().next()?;
+            if ch.is_ascii_alphabetic() {
+                let ctrl_byte = (ch.to_ascii_uppercase() as u8) - b'A' + 1;
+                return Some(String::from(ctrl_byte as char));
             }
-
-            // Ctrl+letter → control character (0x01..0x1A)
-            if modifiers.control() {
-                if let Some(ch) = s.chars().next() {
-                    if ch.is_ascii_alphabetic() {
-                        let ctrl_byte = (ch.to_ascii_uppercase() as u8) - b'A' + 1;
-                        return Some(String::from(ctrl_byte as char));
-                    }
-                    // Ctrl+[ = ESC, Ctrl+] = 0x1D, Ctrl+\ = 0x1C
-                    return match ch {
-                        '[' => Some("\x1b".to_string()),
-                        '\\' => Some("\x1c".to_string()),
-                        ']' => Some("\x1d".to_string()),
-                        '2' | '@' => Some("\x00".to_string()), // Ctrl+2/@ = NUL
-                        '6' | '^' => Some("\x1e".to_string()), // Ctrl+6/^ = RS
-                        _ => None,
-                    };
-                }
-            }
-
-            // Alt/Option+key → ESC prefix (meta key)
-            if modifiers.alt() {
-                return Some(format!("\x1b{}", s));
-            }
-
-            Some(s.to_string())
-        }
-        Key::Named(named) => {
-            // Cmd+named key — skip (OS handles)
-            if modifiers.command() {
-                return None;
-            }
-
-            // Shift/Ctrl/Alt modified arrow keys (vim, tmux, etc.)
-            if modifiers.shift() || modifiers.control() || modifiers.alt() {
-                let base = match named {
-                    Named::ArrowUp => "A",
-                    Named::ArrowDown => "B",
-                    Named::ArrowRight => "C",
-                    Named::ArrowLeft => "D",
-                    Named::Home => "H",
-                    Named::End => "F",
-                    _ => "",
-                };
-                if !base.is_empty() {
-                    let mod_code = match (modifiers.shift(), modifiers.alt(), modifiers.control()) {
-                        (true, false, false) => 2,   // Shift
-                        (false, true, false) => 3,    // Alt
-                        (true, true, false) => 4,     // Shift+Alt
-                        (false, false, true) => 5,    // Ctrl
-                        (true, false, true) => 6,     // Ctrl+Shift
-                        (false, true, true) => 7,     // Ctrl+Alt
-                        (true, true, true) => 8,      // Ctrl+Alt+Shift
-                        _ => 1,
-                    };
-                    if mod_code > 1 {
-                        return Some(format!("\x1b[1;{}{}", mod_code, base));
-                    }
-                }
-            }
-
-            let seq = match named {
-                Named::Enter => "\r",
-                Named::Backspace => "\x7f",
-                Named::Tab if modifiers.shift() => return Some("\x1b[Z".to_string()),
-                Named::Tab => "\t",
-                Named::Escape => "\x1b",
-                Named::ArrowUp => "\x1b[A",
-                Named::ArrowDown => "\x1b[B",
-                Named::ArrowRight => "\x1b[C",
-                Named::ArrowLeft => "\x1b[D",
-                Named::Home => "\x1b[H",
-                Named::End => "\x1b[F",
-                Named::PageUp => "\x1b[5~",
-                Named::PageDown => "\x1b[6~",
-                Named::Insert => "\x1b[2~",
-                Named::Delete => "\x1b[3~",
-                Named::F1 => "\x1bOP",
-                Named::F2 => "\x1bOQ",
-                Named::F3 => "\x1bOR",
-                Named::F4 => "\x1bOS",
-                Named::F5 => "\x1b[15~",
-                Named::F6 => "\x1b[17~",
-                Named::F7 => "\x1b[18~",
-                Named::F8 => "\x1b[19~",
-                Named::F9 => "\x1b[20~",
-                Named::F10 => "\x1b[21~",
-                Named::F11 => "\x1b[23~",
-                Named::F12 => "\x1b[24~",
-                Named::Space => {
-                    if modifiers.control() {
-                        return Some("\x00".to_string()); // Ctrl+Space = NUL
-                    }
-                    " "
-                }
-                _ => return None,
+            return match ch {
+                '[' => Some("\x1b".to_string()),
+                '\\' => Some("\x1c".to_string()),
+                ']' => Some("\x1d".to_string()),
+                '2' | '@' => Some("\x00".to_string()),
+                '6' | '^' => Some("\x1e".to_string()),
+                _ => None,
             };
-            Some(seq.to_string())
         }
-        _ => None,
+    }
+
+    // Alt/Option+key → ESC prefix
+    if modifiers.alt() {
+        if let Some(t) = text {
+            if !t.is_empty() {
+                return Some(format!("\x1b{}", t));
+            }
+        }
+        if let Key::Character(c) = key {
+            return Some(format!("\x1b{}", c.as_str()));
+        }
+    }
+
+    // Named/special keys
+    if let Key::Named(named) = key {
+        // Modified arrow keys (Shift/Ctrl/Alt + arrow)
+        if modifiers.shift() || modifiers.control() || modifiers.alt() {
+            let base = match named {
+                Named::ArrowUp => "A", Named::ArrowDown => "B",
+                Named::ArrowRight => "C", Named::ArrowLeft => "D",
+                Named::Home => "H", Named::End => "F",
+                _ => "",
+            };
+            if !base.is_empty() {
+                let m = match (modifiers.shift(), modifiers.alt(), modifiers.control()) {
+                    (true, false, false) => 2, (false, true, false) => 3,
+                    (true, true, false) => 4, (false, false, true) => 5,
+                    (true, false, true) => 6, (false, true, true) => 7,
+                    (true, true, true) => 8, _ => 1,
+                };
+                if m > 1 { return Some(format!("\x1b[1;{}{}", m, base)); }
+            }
+        }
+
+        let seq = match named {
+            Named::Enter => "\r",
+            Named::Backspace => "\x7f",
+            Named::Tab if modifiers.shift() => return Some("\x1b[Z".to_string()),
+            Named::Tab => "\t",
+            Named::Escape => "\x1b",
+            Named::ArrowUp => "\x1b[A",
+            Named::ArrowDown => "\x1b[B",
+            Named::ArrowRight => "\x1b[C",
+            Named::ArrowLeft => "\x1b[D",
+            Named::Home => "\x1b[H",
+            Named::End => "\x1b[F",
+            Named::PageUp => "\x1b[5~",
+            Named::PageDown => "\x1b[6~",
+            Named::Insert => "\x1b[2~",
+            Named::Delete => "\x1b[3~",
+            Named::F1 => "\x1bOP", Named::F2 => "\x1bOQ",
+            Named::F3 => "\x1bOR", Named::F4 => "\x1bOS",
+            Named::F5 => "\x1b[15~", Named::F6 => "\x1b[17~",
+            Named::F7 => "\x1b[18~", Named::F8 => "\x1b[19~",
+            Named::F9 => "\x1b[20~", Named::F10 => "\x1b[21~",
+            Named::F11 => "\x1b[23~", Named::F12 => "\x1b[24~",
+            Named::Space if modifiers.control() => return Some("\x00".to_string()),
+            Named::Space => " ",
+            _ => return None,
+        };
+        return Some(seq.to_string());
+    }
+
+    // Character input: use `text` field (contains actual typed character
+    // including Shift transformations like ; → :, 9 → (, etc.)
+    if let Some(t) = text {
+        if !t.is_empty() && !modifiers.control() {
+            return Some(t.to_string());
+        }
+    }
+
+    // Fallback to Key::Character (unmodified)
+    if let Key::Character(c) = key {
+        Some(c.as_str().to_string())
+    } else {
+        None
     }
 }
 
