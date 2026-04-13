@@ -13,11 +13,17 @@ env:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            arch: aarch64
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,7 +44,7 @@ jobs:
 
       - name: Package DMG
         run: |
-          ARCH=$(echo "${{ matrix.target }}" | cut -d'-' -f1)
+          ARCH=${{ matrix.arch }}
           VERSION=${GITHUB_REF_NAME#v}
           APP="dist/NeoShell.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
