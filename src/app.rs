@@ -48,12 +48,15 @@ const CJK_FONT: Font = Font {
 // ZMODEM protocol detection
 // ---------------------------------------------------------------------------
 
-/// ZMODEM ZRQINIT signature — sent by `rz` when waiting for a file.
-const ZMODEM_ZRQINIT: &[u8] = b"**\x18B00";
-/// ZMODEM ZRINIT signature — sent by `sz` when ready to send.
-const ZMODEM_ZRINIT: &[u8] = b"**\x18B01";
 /// ZMODEM cancel sequence: 5x CAN + 5x BS.
 const ZMODEM_CANCEL: &[u8] = &[0x18, 0x18, 0x18, 0x18, 0x18, 0x08, 0x08, 0x08, 0x08, 0x08];
+
+/// Detect ZMODEM from `rz` command.
+fn detect_zmodem_rz(data: &[u8]) -> bool {
+    data.windows(6).any(|w| w.starts_with(b"**\x18B0"))
+        || data.windows(4).any(|w| w == b"**B0")
+        || data.windows(22).any(|w| w.starts_with(b"rz waiting to receive"))
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -727,10 +730,8 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                                 }
                             }
 
-                            // Detect ZMODEM ZRQINIT (rz waiting for upload)
-                            if data.len() >= 6
-                                && data.windows(6).any(|w| w.starts_with(ZMODEM_ZRQINIT))
-                            {
+                            // Detect ZMODEM from rz (remote wants to receive file)
+                            if data.len() >= 4 && detect_zmodem_rz(&data) {
                                 let _ = state.ssh_manager.send_data(&session_id, ZMODEM_CANCEL);
                                 state.zmodem_active.insert(session_id.clone(), std::time::Instant::now());
                                 if let Some(tab) =
@@ -744,9 +745,10 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                                 continue;
                             }
 
-                            // Detect ZMODEM ZRINIT (sz ready to send)
-                            if data.len() >= 6
-                                && data.windows(6).any(|w| w.starts_with(ZMODEM_ZRINIT))
+                            // Detect ZMODEM from sz (remote wants to send file)
+                            if data.len() >= 4
+                                && (data.windows(6).any(|w| w.starts_with(b"**\x18B00"))
+                                    || data.windows(4).any(|w| w == b"**B0"))
                             {
                                 let _ = state.ssh_manager.send_data(&session_id, ZMODEM_CANCEL);
                                 state.zmodem_active.insert(session_id.clone(), std::time::Instant::now());
