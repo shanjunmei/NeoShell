@@ -37,6 +37,16 @@ pub struct ConnectParams {
     pub passphrase: Option<String>,
 }
 
+/// How the interactive shell is wrapped for session persistence.
+#[derive(Clone, Debug)]
+pub enum SessionMode {
+    /// Persistent session using remote FIFO pipes + setsid shell.
+    /// Shell survives SSH disconnect; reconnect reattaches via pipes.
+    Persistent(String),  // session name (used for FIFO paths)
+    /// Raw shell — reconnect gets a new shell, display preserved locally only.
+    RawShell,
+}
+
 /// Per-interface network statistics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetInterface {
@@ -149,6 +159,8 @@ pub struct SshSession {
     pub exec_session: Arc<Mutex<Session>>,
     /// Connection parameters stored for automatic reconnection.
     pub params: ConnectParams,
+    /// Session persistence mode.
+    pub mode: SessionMode,
 }
 
 /// Manages multiple concurrent SSH sessions.
@@ -305,6 +317,10 @@ impl SshManager {
             Arc::new(Mutex::new(sess2))
         };
 
+        // --- Detect session persistence capability --------------------------
+        let session_name = format!("neo-{}", &session_id[..8]);
+        let mode = detect_and_setup_session(&session, &session_name);
+
         // --- Open channel, request PTY, start shell -------------------------
         let mut channel = session
             .channel_session()
@@ -314,9 +330,26 @@ impl SshManager {
             .request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
             .map_err(|e| format!("PTY request failed: {}", e))?;
 
-        channel
-            .shell()
-            .map_err(|e| format!("Shell request failed: {}", e))?;
+        match &mode {
+            SessionMode::Persistent(name) => {
+                // Create or attach to persistent tmux session with hidden UI
+                let cmd = format!(
+                    "tmux has-session -t {n} 2>/dev/null && tmux attach-session -t {n} || \
+                     (tmux new-session -d -s {n} -x 80 -y 24 2>/dev/null && \
+                      tmux set-option -t {n} status off 2>/dev/null && \
+                      tmux attach-session -t {n}) || exec $SHELL -l",
+                    n = name
+                );
+                channel
+                    .exec(&cmd)
+                    .map_err(|e| format!("Session setup failed: {}", e))?;
+            }
+            SessionMode::RawShell => {
+                channel
+                    .shell()
+                    .map_err(|e| format!("Shell request failed: {}", e))?;
+            }
+        }
 
         // Make the session non-blocking for reading
         session.set_blocking(false);
@@ -340,6 +373,7 @@ impl SshManager {
 
         // Clone reconnection context for the reader thread.
         let reader_params = params.clone();
+        let reader_mode = mode.clone();
         let reader_exec = Arc::clone(&exec_session);
 
         // --- Reader thread: reads from SSH channel, emits SshEvent ---------
@@ -404,7 +438,7 @@ impl SshManager {
                     std::thread::sleep(Duration::from_millis(backoff_ms));
                     backoff_ms = (backoff_ms * 2).min(30_000);
 
-                    match reconnect_ssh(&reader_params) {
+                    match reconnect_ssh(&reader_params, &reader_mode) {
                         Ok((new_session, new_channel, new_exec)) => {
                             // Replace channel first (writer shares this Arc)
                             {
@@ -514,6 +548,7 @@ impl SshManager {
             writer: cmd_tx,
             exec_session,
             params,
+            mode,
         };
 
         self.sessions.write().insert(session_id.clone(), ssh_session);
@@ -1078,8 +1113,33 @@ fn create_exec_connection(params: &ConnectParams) -> Result<Session, String> {
     Ok(session)
 }
 
+/// Detect available session persistence tools on the remote server and decide
+/// which `SessionMode` to use.
+///
+/// Priority: tmux (hidden UI) > raw shell fallback.
+/// The detection runs a quick exec channel to probe `command -v tmux`.
+fn detect_and_setup_session(session: &Session, name: &str) -> SessionMode {
+    session.set_blocking(true);
+
+    let result = (|| -> Result<String, String> {
+        let mut ch = session.channel_session().map_err(|e| format!("{}", e))?;
+        ch.exec("command -v tmux >/dev/null 2>&1 && echo HAS_TMUX || echo NONE")
+            .map_err(|e| format!("{}", e))?;
+        let mut out = String::new();
+        ch.read_to_string(&mut out).ok();
+        let _ = ch.wait_close();
+        Ok(out)
+    })();
+
+    match result {
+        Ok(ref out) if out.contains("HAS_TMUX") => SessionMode::Persistent(name.to_string()),
+        _ => SessionMode::RawShell,
+    }
+}
+
 fn reconnect_ssh(
     params: &ConnectParams,
+    mode: &SessionMode,
 ) -> Result<(Session, ssh2::Channel, Session), String> {
     let addr = format!("{}:{}", params.host, params.port);
     let tcp = TcpStream::connect_timeout(
@@ -1138,9 +1198,23 @@ fn reconnect_ssh(
         .request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
         .map_err(|e| format!("PTY failed: {}", e))?;
 
-    channel
-        .shell()
-        .map_err(|e| format!("Shell failed: {}", e))?;
+    match mode {
+        SessionMode::Persistent(name) => {
+            // Reattach to existing tmux session (it survived the disconnect)
+            let cmd = format!(
+                "tmux attach-session -t {} 2>/dev/null || exec $SHELL -l",
+                name
+            );
+            channel
+                .exec(&cmd)
+                .map_err(|e| format!("Reattach failed: {}", e))?;
+        }
+        SessionMode::RawShell => {
+            channel
+                .shell()
+                .map_err(|e| format!("Shell failed: {}", e))?;
+        }
+    }
 
     // Set non-blocking for the reader thread
     session.set_blocking(false);
