@@ -58,6 +58,43 @@ fn detect_zmodem_rz(data: &[u8]) -> bool {
         || data.windows(22).any(|w| w.starts_with(b"rz waiting to receive"))
 }
 
+/// Extract CWD from the shell prompt in the terminal grid.
+/// Matches common prompt patterns like:
+///   user@host:/path$    user@host:~$    (env) user@host:/path$
+fn extract_cwd_from_prompt(grid: &TerminalGrid) -> Option<String> {
+    // Scan bottom-up for a line with a prompt pattern
+    for y in (0..grid.rows).rev() {
+        let line: String = grid.cells[y].iter()
+            .filter(|c| !c.wide_cont)
+            .map(|c| c.c)
+            .collect();
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+
+        // Match pattern: ...@...:PATH$ or ...@...:PATH#
+        // Find the last occurrence of @...:/path$ pattern
+        if let Some(at_pos) = trimmed.rfind('@') {
+            let after_at = &trimmed[at_pos + 1..];
+            if let Some(colon_pos) = after_at.find(':') {
+                let after_colon = &after_at[colon_pos + 1..];
+                // Extract path: everything until $ or # or end
+                let path: String = after_colon
+                    .chars()
+                    .take_while(|&c| c != '$' && c != '#')
+                    .collect();
+                let path = path.trim().to_string();
+                if !path.is_empty() {
+                    // Expand ~ to actual home if needed
+                    return Some(path);
+                }
+            }
+        }
+        // Only check the last non-empty line with prompt
+        break;
+    }
+    None
+}
+
 /// Extract "sz filename" from the terminal grid (shell echo already rendered).
 /// Scans recent lines bottom-up for "sz " pattern.
 fn extract_sz_from_grid(grid: &TerminalGrid) -> Option<String> {
@@ -283,7 +320,7 @@ pub enum Message {
 
     // Monitor
     FetchMonitorData,
-    MonitorDataReceived(String, ServerStats, Vec<ProcessInfo>, String), // sid, stats, procs, cwd
+    MonitorDataReceived(String, ServerStats, Vec<ProcessInfo>),
     MonitorError(String),
     ShowNetworkDetail(crate::ssh::NetInterface),
     HideNetworkDetail,
@@ -1065,15 +1102,12 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                             tokio::task::spawn_blocking(move || {
                                 let stats = ssh.fetch_server_stats(&sid)?;
                                 let procs = ssh.fetch_top_processes(&sid, 15)?;
-                                // Also get shell CWD for file browser sync
-                                let cwd = ssh.exec_command(&sid, "pwd")
-                                    .unwrap_or_default().trim().to_string();
-                                Ok((sid, stats, procs, cwd))
+                                Ok((sid, stats, procs))
                             }).await.map_err(|e| format!("{}", e))?
                         },
-                        |r: Result<(String, ServerStats, Vec<ProcessInfo>, String), String>| match r {
-                            Ok((sid, stats, procs, cwd)) => {
-                                Message::MonitorDataReceived(sid, stats, procs, cwd)
+                        |r: Result<(String, ServerStats, Vec<ProcessInfo>), String>| match r {
+                            Ok((sid, stats, procs)) => {
+                                Message::MonitorDataReceived(sid, stats, procs)
                             }
                             Err(e) => Message::MonitorError(e),
                         },
@@ -1082,7 +1116,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::MonitorDataReceived(sid, stats, procs, cwd) => {
+        Message::MonitorDataReceived(sid, stats, procs) => {
             // Calculate network speed
             let now = std::time::Instant::now();
             if let Some(prev_time) = state.prev_net_time.get(&sid) {
@@ -1103,12 +1137,16 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             state.server_stats.insert(sid.clone(), stats);
             state.top_processes.insert(sid.clone(), procs);
 
-            // Sync file browser with shell CWD
-            if !cwd.is_empty() {
-                let prev_dir = state.current_dir.get(&sid).cloned().unwrap_or_default();
-                if prev_dir != cwd {
-                    state.current_dir.insert(sid.clone(), cwd.clone());
-                    return Task::done(Message::ChangeDir(sid, cwd));
+            // Sync file browser with shell CWD (extracted from terminal prompt)
+            if let Some(tab) = state.tabs.iter().find(|t| t.session_id == sid) {
+                let grid = tab.terminal.lock();
+                if let Some(cwd) = extract_cwd_from_prompt(&grid) {
+                    let prev_dir = state.current_dir.get(&sid).cloned().unwrap_or_default();
+                    if prev_dir != cwd {
+                        drop(grid);
+                        state.current_dir.insert(sid.clone(), cwd.clone());
+                        return Task::done(Message::ChangeDir(sid, cwd));
+                    }
                 }
             }
             Task::none()
