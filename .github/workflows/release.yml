@@ -30,10 +30,13 @@ jobs:
         run: brew install libssh2 openssl@3
 
       - name: Build release
-        env:
-          OPENSSL_DIR: /usr/local/opt/openssl@3
-          OPENSSL_ROOT_DIR: /usr/local/opt/openssl@3
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          if [ -d "/opt/homebrew/opt/openssl@3" ]; then
+            export OPENSSL_DIR="/opt/homebrew/opt/openssl@3"
+          elif [ -d "/usr/local/opt/openssl@3" ]; then
+            export OPENSSL_DIR="/usr/local/opt/openssl@3"
+          fi
+          cargo build --release --target ${{ matrix.target }}
 
       - name: Create .app bundle and DMG
         run: |
