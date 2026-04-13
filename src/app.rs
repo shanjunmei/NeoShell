@@ -45,6 +45,17 @@ const CJK_FONT: Font = Font {
 };
 
 // ---------------------------------------------------------------------------
+// ZMODEM protocol detection
+// ---------------------------------------------------------------------------
+
+/// ZMODEM ZRQINIT signature — sent by `rz` when waiting for a file.
+const ZMODEM_ZRQINIT: &[u8] = b"**\x18B00";
+/// ZMODEM ZRINIT signature — sent by `sz` when ready to send.
+const ZMODEM_ZRINIT: &[u8] = b"**\x18B01";
+/// ZMODEM cancel sequence: 5x CAN + 5x BS.
+const ZMODEM_CANCEL: &[u8] = &[0x18, 0x18, 0x18, 0x18, 0x18, 0x08, 0x08, 0x08, 0x08, 0x08];
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
@@ -108,6 +119,9 @@ pub struct NeoShell {
     prev_net_time: HashMap<String, std::time::Instant>,
     net_rx_rate: HashMap<String, f64>,
     net_tx_rate: HashMap<String, f64>,
+
+    // ZMODEM: suppress residual binary data for ~2s after detection
+    zmodem_active: HashMap<String, std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -229,6 +243,11 @@ pub enum Message {
     KeyFileSelected(String),
     ImportSshConfig(crate::sshconfig::SshHostConfig),
 
+    // rz/sz ZMODEM
+    RzDetected(String),      // session_id — rz wants to receive a file
+    SzDetected(String),      // session_id — sz wants to send a file
+    RzUploadDone(String),    // session_id — upload finished
+
     // Misc
     Tick,
     None,
@@ -282,6 +301,7 @@ impl Default for NeoShell {
             prev_net_time: HashMap::new(),
             net_rx_rate: HashMap::new(),
             net_tx_rate: HashMap::new(),
+            zmodem_active: HashMap::new(),
         }
     }
 }
@@ -691,10 +711,57 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
 
         // ---- SSH event polling -----------------------------------------------
         Message::PollSshEvents => {
+            let mut rz_sessions: Vec<String> = Vec::new();
+            let mut sz_sessions: Vec<String> = Vec::new();
+
             if let Some(rx) = &state.ssh_event_rx {
                 while let Ok(event) = rx.try_recv() {
                     match event {
                         SshEvent::Data { session_id, data } => {
+                            // Skip ZMODEM residual binary data for 2s after detection
+                            if let Some(detected_at) = state.zmodem_active.get(&session_id) {
+                                if detected_at.elapsed() < Duration::from_secs(2) {
+                                    continue;
+                                } else {
+                                    state.zmodem_active.remove(&session_id);
+                                }
+                            }
+
+                            // Detect ZMODEM ZRQINIT (rz waiting for upload)
+                            if data.len() >= 6
+                                && data.windows(6).any(|w| w.starts_with(ZMODEM_ZRQINIT))
+                            {
+                                let _ = state.ssh_manager.send_data(&session_id, ZMODEM_CANCEL);
+                                state.zmodem_active.insert(session_id.clone(), std::time::Instant::now());
+                                if let Some(tab) =
+                                    state.tabs.iter().find(|t| t.session_id == session_id)
+                                {
+                                    tab.terminal.lock().write(
+                                        b"\r\n\x1b[36m[NeoShell] rz detected - opening file picker...\x1b[0m\r\n",
+                                    );
+                                }
+                                rz_sessions.push(session_id.clone());
+                                continue;
+                            }
+
+                            // Detect ZMODEM ZRINIT (sz ready to send)
+                            if data.len() >= 6
+                                && data.windows(6).any(|w| w.starts_with(ZMODEM_ZRINIT))
+                            {
+                                let _ = state.ssh_manager.send_data(&session_id, ZMODEM_CANCEL);
+                                state.zmodem_active.insert(session_id.clone(), std::time::Instant::now());
+                                if let Some(tab) =
+                                    state.tabs.iter().find(|t| t.session_id == session_id)
+                                {
+                                    tab.terminal.lock().write(
+                                        b"\r\n\x1b[36m[NeoShell] sz detected - use file browser to download\x1b[0m\r\n",
+                                    );
+                                }
+                                sz_sessions.push(session_id.clone());
+                                continue;
+                            }
+
+                            // Normal data — write to terminal
                             if let Some(tab) =
                                 state.tabs.iter().find(|t| t.session_id == session_id)
                             {
@@ -703,6 +770,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                             }
                         }
                         SshEvent::Closed { session_id } => {
+                            state.zmodem_active.remove(&session_id);
                             if let Some(idx) =
                                 state.tabs.iter().position(|t| t.session_id == session_id)
                             {
@@ -733,7 +801,6 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                             if let Some(tab) =
                                 state.tabs.iter_mut().find(|t| t.session_id == session_id)
                             {
-                                // Restore original title
                                 let base = tab.title.split(" [").next().unwrap_or(&tab.title).to_string();
                                 tab.title = base;
                             }
@@ -741,6 +808,15 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                     }
                 }
             }
+
+            // Dispatch ZMODEM messages (only one Task can be returned per update)
+            if let Some(sid) = rz_sessions.into_iter().next() {
+                return Task::done(Message::RzDetected(sid));
+            }
+            if let Some(sid) = sz_sessions.into_iter().next() {
+                return Task::done(Message::SzDetected(sid));
+            }
+
             Task::none()
         }
 
@@ -1171,6 +1247,68 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                 ..Default::default()
             };
             Task::none()
+        }
+
+        // ---- rz/sz ZMODEM handlers -------------------------------------------
+        Message::RzDetected(sid) => {
+            let current_dir = state.current_dir.get(&sid).cloned()
+                .unwrap_or_else(|| "~".to_string());
+            let ssh = state.ssh_manager.clone();
+            let progress = Arc::new(TransferProgress::new());
+            state.transfer_progress = Some(progress.clone());
+
+            Task::perform(
+                async move {
+                    let default_dir = dirs::download_dir()
+                        .or_else(dirs::desktop_dir)
+                        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
+                    let file = rfd::AsyncFileDialog::new()
+                        .set_title("rz: Select file to upload")
+                        .set_directory(&default_dir)
+                        .pick_file()
+                        .await;
+
+                    if let Some(file) = file {
+                        let local_path = file.path().to_string_lossy().to_string();
+                        let file_name = file.file_name();
+                        let remote_path = format!(
+                            "{}/{}",
+                            current_dir.trim_end_matches('/'),
+                            file_name
+                        );
+                        tokio::task::spawn_blocking(move || {
+                            ssh.upload_file_with_progress(&sid, &local_path, &remote_path, progress)
+                                .map(|_| sid)
+                        })
+                        .await
+                        .map_err(|e| format!("Task: {}", e))?
+                    } else {
+                        Err("cancelled".to_string())
+                    }
+                },
+                |result: Result<String, String>| match result {
+                    Ok(sid) => Message::RzUploadDone(sid),
+                    Err(e) if e == "cancelled" => Message::None,
+                    Err(e) => Message::Error(e),
+                },
+            )
+        }
+        Message::RzUploadDone(sid) => {
+            state.transfer_progress = None;
+            if let Some(tab) = state.tabs.iter().find(|t| t.session_id == sid) {
+                tab.terminal.lock().write(
+                    b"\r\n\x1b[32m[NeoShell] Upload complete.\x1b[0m\r\n",
+                );
+            }
+            let path = state.current_dir.get(&sid).cloned()
+                .unwrap_or_else(|| "~".to_string());
+            Task::done(Message::ChangeDir(sid, path))
+        }
+        Message::SzDetected(sid) => {
+            // Refresh the SFTP file browser so the user can pick the file to download
+            let path = state.current_dir.get(&sid).cloned()
+                .unwrap_or_else(|| "~".to_string());
+            Task::done(Message::ChangeDir(sid, path))
         }
 
         // ---- misc ------------------------------------------------------------
