@@ -748,7 +748,17 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         // ---- keyboard -------------------------------------------------------
         Message::KeyboardEvent(key, modifiers, text) => {
             if state.screen != Screen::Main { return Task::none(); }
-            if state.editor_file_path.is_some() { return Task::none(); }
+            if state.editor_file_path.is_some() {
+                // Allow Cmd+S to save the open editor
+                if modifiers.command() {
+                    if let keyboard::Key::Character(c) = &key {
+                        if c.as_str() == "s" {
+                            return Task::done(Message::SaveEditor);
+                        }
+                    }
+                }
+                return Task::none();
+            }
             if state.show_form { return Task::none(); }
             if state.selected_interface.is_some() { return Task::none(); }
 
@@ -1470,13 +1480,22 @@ fn view_tab_bar(state: &NeoShell) -> Element<'_, Message> {
             theme::TEXT_SECONDARY
         };
 
+        // Connection status indicator dot
+        let status_dot = if tab.session_id.is_empty() {
+            text("● ").color(theme::WARNING).size(10) // Connecting...
+        } else if tab.title.contains("[Reconnecting") {
+            text("● ").color(theme::WARNING).size(10) // Reconnecting
+        } else {
+            text("● ").color(theme::SUCCESS).size(10) // Connected
+        };
+
         let label = text(&tab.title).color(text_color).size(13);
         let close_btn = button(text("x").color(theme::TEXT_MUTED).size(11))
             .on_press(Message::TabClosed(i))
             .padding(Padding::from([2, 6]))
             .style(transparent_button_style);
 
-        let tab_content = row![label, close_btn]
+        let tab_content = row![status_dot, label, close_btn]
             .spacing(8)
             .align_y(alignment::Vertical::Center);
 
@@ -1986,8 +2005,27 @@ fn view_transfer_progress(progress: &TransferProgress) -> Element<'static, Messa
     let total = progress.total.load(Ordering::Relaxed);
     let filename = progress.filename.lock().clone();
 
+    // Calculate transfer speed from start_time
+    let speed = if let Some(start) = progress.start_time.lock().as_ref() {
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed > 0.5 && transferred > 0 {
+            format!(" — {}/s", format_bytes((transferred as f64 / elapsed) as u64))
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     let label = if total > 0 {
-        format!("{} — {} / {} ({:.0}%)", filename, format_bytes(transferred), format_bytes(total), pct)
+        format!(
+            "{} — {} / {} ({:.0}%){}",
+            filename,
+            format_bytes(transferred),
+            format_bytes(total),
+            pct,
+            speed
+        )
     } else {
         format!("{} — preparing...", filename)
     };

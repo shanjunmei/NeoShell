@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Read as IoRead, Write as IoWrite};
+use std::io::{Read as IoRead, Seek, Write as IoWrite};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
@@ -119,6 +119,7 @@ pub struct TransferProgress {
     pub finished: AtomicBool,
     pub error: parking_lot::Mutex<Option<String>>,
     pub filename: parking_lot::Mutex<String>,
+    pub start_time: parking_lot::Mutex<Option<std::time::Instant>>,
 }
 
 impl TransferProgress {
@@ -129,6 +130,7 @@ impl TransferProgress {
             finished: AtomicBool::new(false),
             error: parking_lot::Mutex::new(None),
             filename: parking_lot::Mutex::new(String::new()),
+            start_time: parking_lot::Mutex::new(None),
         }
     }
 
@@ -974,7 +976,7 @@ impl SshManager {
         Ok(())
     }
 
-    /// Upload a local file with progress reporting (Arc<TransferProgress>).
+    /// Upload a local file with progress reporting and resume support.
     pub fn upload_file_with_progress(
         &self,
         session_id: &str,
@@ -984,8 +986,9 @@ impl SshManager {
     ) -> Result<(), String> {
         let exec_session = self.get_exec_session(session_id)?;
 
-        let contents = std::fs::read(local_path)
-            .map_err(|e| format!("Failed to read local file: {}", e))?;
+        let local_size = std::fs::metadata(local_path)
+            .map(|m| m.len())
+            .map_err(|e| format!("Local file error: {}", e))?;
 
         let filename = std::path::Path::new(local_path)
             .file_name()
@@ -993,33 +996,78 @@ impl SshManager {
             .unwrap_or("file")
             .to_string();
         *progress.filename.lock() = filename;
-        progress.total.store(contents.len() as u64, Ordering::Relaxed);
-        progress.transferred.store(0, Ordering::Relaxed);
+        progress.total.store(local_size, Ordering::Relaxed);
         progress.finished.store(false, Ordering::Relaxed);
 
         let sess = exec_session.lock();
         sess.set_blocking(true);
         let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
-        let mut remote_file = sftp
-            .create(std::path::Path::new(remote_path))
-            .map_err(|e| format!("Failed to create remote file: {}", e))?;
 
-        let chunk_size = 32768; // 32KB chunks
-        let mut offset = 0usize;
-        while offset < contents.len() {
-            let end = (offset + chunk_size).min(contents.len());
+        // Check remote file size for resume
+        let remote_size = sftp
+            .stat(std::path::Path::new(remote_path))
+            .map(|s| s.size.unwrap_or(0))
+            .unwrap_or(0);
+
+        let start_offset = if remote_size > 0 && remote_size < local_size {
+            remote_size // Resume from where we left off
+        } else {
+            0 // Start fresh
+        };
+
+        progress.transferred.store(start_offset, Ordering::Relaxed);
+
+        // Open remote file (create or append for resume)
+        let mut remote_file = if start_offset > 0 {
+            let mut f = sftp
+                .open_mode(
+                    std::path::Path::new(remote_path),
+                    ssh2::OpenFlags::WRITE | ssh2::OpenFlags::APPEND,
+                    0o644,
+                    ssh2::OpenType::File,
+                )
+                .map_err(|e| format!("Open for append failed: {}", e))?;
+            f.seek(std::io::SeekFrom::Start(start_offset)).ok();
+            f
+        } else {
+            sftp.create(std::path::Path::new(remote_path))
+                .map_err(|e| format!("Failed to create remote file: {}", e))?
+        };
+
+        // Open local file and seek past already-uploaded bytes
+        let mut local_file =
+            std::fs::File::open(local_path).map_err(|e| format!("Open local: {}", e))?;
+        if start_offset > 0 {
+            local_file
+                .seek(std::io::SeekFrom::Start(start_offset))
+                .map_err(|e| format!("Seek local: {}", e))?;
+        }
+
+        // Record transfer start time for speed calculation
+        *progress.start_time.lock() = Some(std::time::Instant::now());
+
+        let mut buf = [0u8; 32768];
+        let mut uploaded = start_offset;
+        loop {
+            if progress.finished.load(Ordering::Relaxed) {
+                return Err("Transfer cancelled".to_string());
+            }
+            let n = local_file.read(&mut buf).map_err(|e| format!("Read: {}", e))?;
+            if n == 0 {
+                break;
+            }
             remote_file
-                .write_all(&contents[offset..end])
-                .map_err(|e| format!("Write error: {}", e))?;
-            offset = end;
-            progress.transferred.store(offset as u64, Ordering::Relaxed);
+                .write_all(&buf[..n])
+                .map_err(|e| format!("Write: {}", e))?;
+            uploaded += n as u64;
+            progress.transferred.store(uploaded, Ordering::Relaxed);
         }
 
         progress.finished.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Download a remote file with progress reporting (Arc<TransferProgress>).
+    /// Download a remote file with progress reporting and resume support.
     pub fn download_file_with_progress(
         &self,
         session_id: &str,
@@ -1029,47 +1077,77 @@ impl SshManager {
     ) -> Result<(), String> {
         let exec_session = self.get_exec_session(session_id)?;
 
+        // Check if local file exists (partial download for resume)
+        let existing_size = std::fs::metadata(local_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        let sess = exec_session.lock();
+        sess.set_blocking(true);
+        let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
+
+        // Get remote file size
+        let file_stat = sftp
+            .stat(std::path::Path::new(remote_path))
+            .map_err(|e| format!("Failed to stat remote file: {}", e))?;
+        let total_size = file_stat.size.unwrap_or(0);
+
+        // Setup progress
         let filename = std::path::Path::new(remote_path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file")
             .to_string();
         *progress.filename.lock() = filename;
-        progress.transferred.store(0, Ordering::Relaxed);
-        progress.finished.store(false, Ordering::Relaxed);
-
-        let sess = exec_session.lock();
-        sess.set_blocking(true);
-        let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
-
-        // Get file size
-        let file_stat = sftp
-            .stat(std::path::Path::new(remote_path))
-            .map_err(|e| format!("Failed to stat remote file: {}", e))?;
-        let total_size = file_stat.size.unwrap_or(0);
         progress.total.store(total_size, Ordering::Relaxed);
+        progress
+            .transferred
+            .store(existing_size, Ordering::Relaxed);
+        progress.finished.store(false, Ordering::Relaxed);
 
         let mut remote_file = sftp
             .open(std::path::Path::new(remote_path))
             .map_err(|e| format!("Failed to open remote file: {}", e))?;
 
-        let mut contents = Vec::with_capacity(total_size as usize);
+        // Seek past already-downloaded bytes for resume
+        if existing_size > 0 && existing_size < total_size {
+            remote_file
+                .seek(std::io::SeekFrom::Start(existing_size))
+                .map_err(|e| format!("Seek failed: {}", e))?;
+        }
+
+        // Open local file in append mode (resume) or create fresh
+        let mut local_file = if existing_size > 0 && existing_size < total_size {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(local_path)
+                .map_err(|e| format!("Open local for append failed: {}", e))?
+        } else {
+            std::fs::File::create(local_path)
+                .map_err(|e| format!("Create local file failed: {}", e))?
+        };
+
+        // Record transfer start time for speed calculation
+        *progress.start_time.lock() = Some(std::time::Instant::now());
+
         let mut buf = [0u8; 32768];
+        let mut downloaded = existing_size;
         loop {
+            if progress.finished.load(Ordering::Relaxed) {
+                return Err("Transfer cancelled".to_string());
+            }
             let n = remote_file
                 .read(&mut buf)
-                .map_err(|e| format!("Read error: {}", e))?;
+                .map_err(|e| format!("Read: {}", e))?;
             if n == 0 {
                 break;
             }
-            contents.extend_from_slice(&buf[..n]);
-            progress
-                .transferred
-                .store(contents.len() as u64, Ordering::Relaxed);
+            local_file
+                .write_all(&buf[..n])
+                .map_err(|e| format!("Write: {}", e))?;
+            downloaded += n as u64;
+            progress.transferred.store(downloaded, Ordering::Relaxed);
         }
-
-        std::fs::write(local_path, &contents)
-            .map_err(|e| format!("Failed to write local file: {}", e))?;
 
         progress.finished.store(true, Ordering::Relaxed);
         Ok(())
