@@ -1,6 +1,6 @@
 use iced::widget::{
     button, canvas, column, container, horizontal_space, row, scrollable, stack, text,
-    text_input, vertical_space, Space,
+    text_editor, text_input, vertical_space, Space,
 };
 use iced::{
     alignment, event, keyboard, mouse, time, Color, Element, Fill, Font,
@@ -56,6 +56,12 @@ pub struct NeoShell {
     // File browser (per active tab)
     file_entries: HashMap<String, Vec<FileEntry>>,
     current_dir: HashMap<String, String>,
+
+    // File editor (modal)
+    editor_content: text_editor::Content,
+    editor_file_path: Option<String>,
+    editor_session_id: Option<String>,
+    editor_dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +151,20 @@ pub enum Message {
     ChangeDir(String, String),
     FileClicked(String, FileEntry),
 
+    // File operations
+    UploadFile,
+    UploadComplete(String),
+    DownloadFile(String, String),
+    DownloadComplete(String),
+
+    // Editor
+    OpenEditor(String, String),
+    EditorContentLoaded(String, String, String),
+    EditorAction(text_editor::Action),
+    SaveEditor,
+    EditorSaved,
+    CloseEditor,
+
     // Misc
     Tick,
     None,
@@ -185,6 +205,10 @@ impl Default for NeoShell {
             top_processes: HashMap::new(),
             file_entries: HashMap::new(),
             current_dir: HashMap::new(),
+            editor_content: text_editor::Content::new(),
+            editor_file_path: None,
+            editor_session_id: None,
+            editor_dirty: false,
         }
     }
 }
@@ -565,6 +589,10 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             if state.screen != Screen::Main {
                 return Task::none();
             }
+            // Don't forward keys to terminal while editor is open
+            if state.editor_file_path.is_some() {
+                return Task::none();
+            }
             if let Some(idx) = state.active_tab {
                 if let Some(tab) = state.tabs.get(idx) {
                     let session_id = tab.session_id.clone();
@@ -653,6 +681,143 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                 };
                 return Task::done(Message::ChangeDir(sid, new_path));
             }
+            Task::none()
+        }
+
+        // ---- file operations -------------------------------------------------
+        Message::UploadFile => {
+            let sid = state.active_tab
+                .and_then(|idx| state.tabs.get(idx))
+                .map(|t| t.session_id.clone());
+            let current = sid.as_ref()
+                .and_then(|s| state.current_dir.get(s))
+                .cloned()
+                .unwrap_or_else(|| "~".to_string());
+
+            if let Some(sid) = sid {
+                let ssh = state.ssh_manager.clone();
+                Task::perform(
+                    async move {
+                        let file = rfd::AsyncFileDialog::new()
+                            .set_title("Select file to upload")
+                            .pick_file()
+                            .await;
+
+                        if let Some(file) = file {
+                            let local_path = file.path().to_string_lossy().to_string();
+                            let file_name = file.file_name();
+                            let remote_path = format!("{}/{}", current.trim_end_matches('/'), file_name);
+
+                            ssh.upload_file(&sid, &local_path, &remote_path)?;
+                            Ok(sid)
+                        } else {
+                            Err("Upload cancelled".to_string())
+                        }
+                    },
+                    |result: Result<String, String>| match result {
+                        Ok(sid) => Message::UploadComplete(sid),
+                        Err(e) => {
+                            if e == "Upload cancelled" { Message::None } else { Message::Error(e) }
+                        }
+                    },
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::UploadComplete(sid) => {
+            let path = state.current_dir.get(&sid).cloned().unwrap_or("~".to_string());
+            Task::done(Message::ChangeDir(sid, path))
+        }
+        Message::DownloadFile(sid, remote_path) => {
+            let ssh = state.ssh_manager.clone();
+            let filename = remote_path.split('/').last().unwrap_or("file").to_string();
+            Task::perform(
+                async move {
+                    let save_path = rfd::AsyncFileDialog::new()
+                        .set_title("Save file as")
+                        .set_file_name(&filename)
+                        .save_file()
+                        .await;
+
+                    if let Some(save_path) = save_path {
+                        let local_path = save_path.path().to_string_lossy().to_string();
+                        ssh.download_file(&sid, &remote_path, &local_path)?;
+                        Ok(format!("Downloaded to {}", local_path))
+                    } else {
+                        Err("Download cancelled".to_string())
+                    }
+                },
+                |result: Result<String, String>| match result {
+                    Ok(msg) => Message::DownloadComplete(msg),
+                    Err(e) => {
+                        if e == "Download cancelled" { Message::None } else { Message::Error(e) }
+                    }
+                },
+            )
+        }
+        Message::DownloadComplete(_msg) => {
+            Task::none()
+        }
+
+        // ---- editor ----------------------------------------------------------
+        Message::OpenEditor(sid, path) => {
+            let ssh = state.ssh_manager.clone();
+            let sid2 = sid.clone();
+            let path2 = path.clone();
+            Task::perform(
+                async move {
+                    let content = ssh.read_file_content(&sid2, &path2)?;
+                    Ok((sid2, path2, content))
+                },
+                |result: Result<(String, String, String), String>| match result {
+                    Ok((sid, path, content)) => Message::EditorContentLoaded(sid, path, content),
+                    Err(e) => Message::Error(e),
+                },
+            )
+        }
+        Message::EditorContentLoaded(sid, path, content) => {
+            state.editor_content = text_editor::Content::with_text(&content);
+            state.editor_file_path = Some(path);
+            state.editor_session_id = Some(sid);
+            state.editor_dirty = false;
+            Task::none()
+        }
+        Message::EditorAction(action) => {
+            let is_edit = action.is_edit();
+            state.editor_content.perform(action);
+            if is_edit {
+                state.editor_dirty = true;
+            }
+            Task::none()
+        }
+        Message::SaveEditor => {
+            if let (Some(sid), Some(path)) = (state.editor_session_id.clone(), state.editor_file_path.clone()) {
+                let ssh = state.ssh_manager.clone();
+                let content = state.editor_content.text();
+                Task::perform(
+                    async move {
+                        ssh.write_file_content(&sid, &path, &content)?;
+                        Ok(())
+                    },
+                    |result: Result<(), String>| match result {
+                        Ok(()) => Message::EditorSaved,
+                        Err(e) => Message::Error(e),
+                    },
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::EditorSaved => {
+            state.editor_dirty = false;
+            Task::none()
+        }
+        Message::CloseEditor => {
+            state.editor_content = text_editor::Content::new();
+            state.editor_file_path = None;
+            state.editor_session_id = None;
+            state.editor_dirty = false;
             Task::none()
         }
 
@@ -858,6 +1023,18 @@ fn view_main(state: &NeoShell) -> Element<'_, Message> {
     let main_layout: Element<'_, Message> = column![tab_bar, body, status_bar]
         .height(Fill)
         .into();
+
+    // Editor overlay (highest priority — on top of everything)
+    if state.editor_file_path.is_some() {
+        let editor_overlay = view_editor(state);
+        return container(stack([
+            container(main_layout).width(Fill).height(Fill).into(),
+            editor_overlay,
+        ]))
+        .width(Fill)
+        .height(Fill)
+        .into();
+    }
 
     // Modal overlay for connection form
     if state.show_form {
@@ -1335,24 +1512,32 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
 
     let entries = state.file_entries.get(&sid);
 
-    // Header with path
+    // Header with path and upload button
     let path_label = text(format!("[DIR] {}", current_path))
         .color(theme::TEXT_PRIMARY)
         .size(12)
         .font(Font::MONOSPACE);
 
-    let header = container(path_label)
-        .padding(Padding::from([6, 10]))
-        .width(Fill)
-        .style(|_| container::Style {
-            background: Some(theme::BG_TERTIARY.into()),
-            border: iced::Border {
-                color: theme::BORDER,
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-            ..Default::default()
-        });
+    let upload_btn = button(text("^ Upload").color(theme::SUCCESS).size(11))
+        .on_press(Message::UploadFile)
+        .padding(Padding::from([4, 8]))
+        .style(transparent_button_style);
+
+    let header = container(
+        row![path_label, horizontal_space(), upload_btn]
+            .align_y(alignment::Vertical::Center),
+    )
+    .padding(Padding::from([6, 10]))
+    .width(Fill)
+    .style(|_| container::Style {
+        background: Some(theme::BG_TERTIARY.into()),
+        border: iced::Border {
+            color: theme::BORDER,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    });
 
     let mut file_col = column![].spacing(0);
 
@@ -1380,34 +1565,71 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
         file_col = file_col.push(parent_btn);
 
         for entry in entries.iter().filter(|e| e.name != "..") {
-            let icon = if entry.is_dir { "[D]" } else { "[F]" };
+            let icon = if entry.is_dir { "D" } else { "F" };
             let name_color = if entry.is_dir {
                 theme::ACCENT
             } else {
                 theme::TEXT_PRIMARY
             };
 
-            let display_name = truncate_str(&entry.name, 24);
-            let entry_line = format!(
-                "{} {:<26} {:>8}  {}",
-                icon, display_name, entry.size, entry.modified,
-            );
-
-            let entry_text = text(entry_line)
+            let name_text = text(format!("{} {}", icon, truncate_str(&entry.name, 20)))
                 .color(name_color)
                 .size(11)
                 .font(Font::MONOSPACE);
+            let size_text = text(&entry.size)
+                .color(theme::TEXT_MUTED)
+                .size(10)
+                .font(Font::MONOSPACE);
+            let date_text = text(&entry.modified)
+                .color(theme::TEXT_MUTED)
+                .size(10)
+                .font(Font::MONOSPACE);
 
-            let entry_clone = entry.clone();
-            let sid_clone = sid.clone();
+            let mut entry_row = row![name_text]
+                .spacing(6)
+                .align_y(alignment::Vertical::Center);
+            entry_row = entry_row.push(horizontal_space());
+            entry_row = entry_row.push(size_text);
+            entry_row = entry_row.push(date_text);
 
-            let entry_btn = button(entry_text)
-                .on_press(Message::FileClicked(sid_clone, entry_clone))
-                .padding(Padding::from([3, 10]))
-                .width(Fill)
-                .style(sidebar_item_style);
+            // Action buttons for files (not directories)
+            if !entry.is_dir {
+                let current = state.current_dir.get(&sid).cloned().unwrap_or("~".to_string());
+                let full_path = format!("{}/{}", current.trim_end_matches('/'), entry.name);
 
-            file_col = file_col.push(entry_btn);
+                // Download button
+                let dl_btn = button(text("v").color(theme::ACCENT).size(11))
+                    .on_press(Message::DownloadFile(sid.clone(), full_path.clone()))
+                    .padding(Padding::from([2, 4]))
+                    .style(transparent_button_style);
+                entry_row = entry_row.push(dl_btn);
+
+                // Edit button (only for editable files)
+                if crate::ssh::is_editable_file(&entry.name) {
+                    let edit_btn = button(text("E").color(theme::SUCCESS).size(11))
+                        .on_press(Message::OpenEditor(sid.clone(), full_path))
+                        .padding(Padding::from([2, 4]))
+                        .style(transparent_button_style);
+                    entry_row = entry_row.push(edit_btn);
+                }
+            }
+
+            // Wrap in a button for click-to-navigate (directories)
+            if entry.is_dir {
+                let entry_clone = entry.clone();
+                let sid_clone = sid.clone();
+                let nav_btn = button(entry_row)
+                    .on_press(Message::FileClicked(sid_clone, entry_clone))
+                    .padding(Padding::from([3, 10]))
+                    .width(Fill)
+                    .style(sidebar_item_style);
+                file_col = file_col.push(nav_btn);
+            } else {
+                // Non-directory files: just show the row with action buttons
+                file_col = file_col.push(
+                    container(entry_row).padding(Padding::from([3, 10])).width(Fill),
+                );
+            }
         }
     } else {
         file_col = file_col.push(
@@ -1419,6 +1641,87 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
     column![header, scrollable(file_col).height(Fill)]
         .height(Length::Fixed(200.0))
         .into()
+}
+
+// ---- File editor (modal overlay) -----------------------------------------
+
+fn view_editor(state: &NeoShell) -> Element<'_, Message> {
+    let file_name = state.editor_file_path.as_deref().unwrap_or("untitled");
+
+    let title_text = if state.editor_dirty {
+        format!("* {} (modified)", file_name)
+    } else {
+        format!("  {}", file_name)
+    };
+
+    let title = text(title_text).color(theme::TEXT_PRIMARY).size(14);
+
+    let save_btn = button(text("Save").color(theme::TEXT_PRIMARY).size(13))
+        .on_press(Message::SaveEditor)
+        .padding(Padding::from([6, 16]))
+        .style(accent_button_style);
+
+    let close_btn = button(text("Close").color(theme::TEXT_SECONDARY).size(13))
+        .on_press(Message::CloseEditor)
+        .padding(Padding::from([6, 16]))
+        .style(transparent_button_style);
+
+    let header = row![title, horizontal_space(), save_btn, close_btn]
+        .spacing(8)
+        .align_y(alignment::Vertical::Center)
+        .padding(Padding::from([8, 12]));
+
+    let header_bar = container(header)
+        .width(Fill)
+        .style(|_| container::Style {
+            background: Some(theme::BG_TERTIARY.into()),
+            border: iced::Border {
+                color: theme::BORDER,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        });
+
+    let editor = text_editor(&state.editor_content)
+        .on_action(Message::EditorAction)
+        .font(Font::MONOSPACE)
+        .size(13)
+        .height(Fill);
+
+    let content = column![header_bar, editor].height(Fill);
+
+    // Full-screen modal overlay
+    container(
+        container(content)
+            .width(Fill)
+            .height(Fill)
+            .max_width(1000)
+            .max_height(700)
+            .style(|_| container::Style {
+                background: Some(theme::BG_SECONDARY.into()),
+                border: iced::Border {
+                    color: theme::BORDER,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.6),
+                    offset: iced::Vector::new(0.0, 8.0),
+                    blur_radius: 32.0,
+                },
+                ..Default::default()
+            }),
+    )
+    .width(Fill)
+    .height(Fill)
+    .center_x(Fill)
+    .center_y(Fill)
+    .style(|_| container::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.7).into()),
+        ..Default::default()
+    })
+    .into()
 }
 
 // ---- Status bar ----------------------------------------------------------

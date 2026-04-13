@@ -589,6 +589,119 @@ impl SshManager {
 
         Ok((current_dir, entries))
     }
+
+    /// Download a remote file to a local path using SFTP.
+    pub fn download_file(&self, session_id: &str, remote_path: &str, local_path: &str) -> Result<(), String> {
+        let sessions = self.sessions.read();
+        let ssh_session = sessions.get(session_id)
+            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+
+        let sess = ssh_session.exec_session.lock();
+        sess.set_blocking(true);
+
+        let sftp = sess.sftp()
+            .map_err(|e| format!("SFTP init failed: {}", e))?;
+
+        let mut remote_file = sftp.open(std::path::Path::new(remote_path))
+            .map_err(|e| format!("Failed to open remote file '{}': {}", remote_path, e))?;
+
+        let mut contents = Vec::new();
+        remote_file.read_to_end(&mut contents)
+            .map_err(|e| format!("Failed to read remote file: {}", e))?;
+
+        std::fs::write(local_path, &contents)
+            .map_err(|e| format!("Failed to write local file '{}': {}", local_path, e))?;
+
+        Ok(())
+    }
+
+    /// Upload a local file to a remote path using SFTP.
+    pub fn upload_file(&self, session_id: &str, local_path: &str, remote_path: &str) -> Result<(), String> {
+        let sessions = self.sessions.read();
+        let ssh_session = sessions.get(session_id)
+            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+
+        let sess = ssh_session.exec_session.lock();
+        sess.set_blocking(true);
+
+        let contents = std::fs::read(local_path)
+            .map_err(|e| format!("Failed to read local file '{}': {}", local_path, e))?;
+
+        let sftp = sess.sftp()
+            .map_err(|e| format!("SFTP init failed: {}", e))?;
+
+        let mut remote_file = sftp.create(std::path::Path::new(remote_path))
+            .map_err(|e| format!("Failed to create remote file '{}': {}", remote_path, e))?;
+
+        remote_file.write_all(&contents)
+            .map_err(|e| format!("Failed to write remote file: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Read a remote file's content as a string (for editing).
+    pub fn read_file_content(&self, session_id: &str, remote_path: &str) -> Result<String, String> {
+        let sessions = self.sessions.read();
+        let ssh_session = sessions.get(session_id)
+            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+
+        let sess = ssh_session.exec_session.lock();
+        sess.set_blocking(true);
+
+        let sftp = sess.sftp()
+            .map_err(|e| format!("SFTP init failed: {}", e))?;
+
+        let mut remote_file = sftp.open(std::path::Path::new(remote_path))
+            .map_err(|e| format!("Failed to open remote file: {}", e))?;
+
+        let mut contents = String::new();
+        remote_file.read_to_string(&mut contents)
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+
+        Ok(contents)
+    }
+
+    /// Write content to a remote file (for saving edits).
+    pub fn write_file_content(&self, session_id: &str, remote_path: &str, content: &str) -> Result<(), String> {
+        let sessions = self.sessions.read();
+        let ssh_session = sessions.get(session_id)
+            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+
+        let sess = ssh_session.exec_session.lock();
+        sess.set_blocking(true);
+
+        let sftp = sess.sftp()
+            .map_err(|e| format!("SFTP init failed: {}", e))?;
+
+        let mut remote_file = sftp.create(std::path::Path::new(remote_path))
+            .map_err(|e| format!("Failed to create remote file: {}", e))?;
+
+        remote_file.write_all(content.as_bytes())
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+
+        Ok(())
+    }
+}
+
+/// Check if a file can be quick-edited based on its extension.
+pub fn is_editable_file(name: &str) -> bool {
+    let editable_extensions = [
+        ".sh", ".bash", ".zsh", ".fish",
+        ".json", ".yaml", ".yml", ".toml", ".conf", ".cfg", ".ini",
+        ".csv", ".tsv",
+        ".py", ".rs", ".go", ".js", ".ts",
+        ".txt", ".md", ".log",
+        ".xml", ".html", ".css",
+        ".env", ".properties",
+        ".service", ".timer",
+        ".dockerfile", ".gitignore",
+    ];
+    let lower = name.to_lowercase();
+    editable_extensions.iter().any(|ext| lower.ends_with(ext))
+        || lower == "makefile"
+        || lower == "dockerfile"
+        || lower == "rakefile"
+        || lower == "gemfile"
 }
 
 /// Parse a human-readable size string (e.g. "1.5G", "500M", "2T") to gigabytes.
