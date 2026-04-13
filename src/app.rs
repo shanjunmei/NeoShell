@@ -193,6 +193,7 @@ pub enum Message {
     PollSshEvents,
     KeyboardEvent(keyboard::Key, keyboard::Modifiers, Option<String>),
     PasteClipboard,
+    CancelTransfer,
 
     // Search
     SearchChanged(String),
@@ -835,6 +836,14 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                     );
                 }
             }
+            Task::none()
+        }
+
+        Message::CancelTransfer => {
+            if let Some(ref progress) = state.transfer_progress {
+                progress.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            state.transfer_progress = None;
             Task::none()
         }
 
@@ -1978,42 +1987,42 @@ fn view_transfer_progress(progress: &TransferProgress) -> Element<'static, Messa
     let filename = progress.filename.lock().clone();
 
     let label = if total > 0 {
-        format!("{} -- {} / {} ({:.0}%)", filename, format_bytes(transferred), format_bytes(total), pct)
+        format!("{} — {} / {} ({:.0}%)", filename, format_bytes(transferred), format_bytes(total), pct)
     } else {
-        format!("{} -- preparing...", filename)
+        format!("{} — preparing...", filename)
     };
 
-    let bar_width_fraction = (pct / 100.0).min(1.0).max(0.0);
-    let filled = (bar_width_fraction * 1000.0) as u16;
-    let empty = 1000_u16.saturating_sub(filled);
-
     let progress_text = text(label).color(theme::TEXT_PRIMARY).size(11);
+    let cancel_btn = button(text("Cancel").color(theme::DANGER).size(11))
+        .on_press(Message::CancelTransfer)
+        .padding(Padding::from([2, 8]))
+        .style(transparent_button_style);
 
-    // Progress bar using FillPortion: filled portion + empty portion in a row
-    let bar_inner = row![
-        container(Space::new(Length::FillPortion(filled.max(1)), 4))
-            .style(|_| container::Style {
-                background: Some(theme::ACCENT.into()),
-                border: iced::Border { radius: 2.0.into(), ..Default::default() },
-                ..Default::default()
-            }),
-        container(Space::new(Length::FillPortion(empty.max(1)), 4))
-            .style(|_| container::Style {
-                background: Some(Color::TRANSPARENT.into()),
-                ..Default::default()
-            }),
-    ].width(Fill);
+    let header_row = row![progress_text, horizontal_space(), cancel_btn]
+        .align_y(alignment::Vertical::Center);
 
-    let bar_bg = container(bar_inner)
+    // Progress bar: fixed-width filled portion inside full-width background
+    let bar_width_px = 600.0; // approximate usable width
+    let filled_px = (pct / 100.0).min(1.0).max(0.0) * bar_width_px;
+
+    let filled_bar = container(Space::new(filled_px as f32, 6))
+        .style(|_| container::Style {
+            background: Some(theme::ACCENT.into()),
+            border: iced::Border { radius: 3.0.into(), ..Default::default() },
+            ..Default::default()
+        });
+
+    let bar_bg = container(filled_bar)
         .width(Fill)
+        .height(6)
         .style(|_| container::Style {
             background: Some(theme::BG_TERTIARY.into()),
-            border: iced::Border { radius: 2.0.into(), ..Default::default() },
+            border: iced::Border { radius: 3.0.into(), ..Default::default() },
             ..Default::default()
         });
 
     container(
-        column![progress_text, bar_bg].spacing(4).padding(Padding::from([6, 10]))
+        column![header_row, bar_bg].spacing(4).padding(Padding::from([6, 10]))
     )
     .width(Fill)
     .style(|_| container::Style {
