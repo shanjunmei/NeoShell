@@ -1750,42 +1750,52 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
     col = col.push(section_header("Top Processes"));
 
     if let Some(procs) = processes {
-        let hdr = format!("{:>6} {:>5} {:>5}  {}", "PID", "CPU%", "MEM%", "CMD");
-        let mut proc_col = column![
-            container(text(hdr).color(theme::TEXT_MUTED).size(9))
-                .padding(Padding::from([4, 8])),
-            sidebar_divider(),
-        ].spacing(0);
+        // Column-aligned header
+        let hdr_row = row![
+            container(text("PID").color(theme::TEXT_MUTED).size(9)).width(42),
+            container(text("CPU").color(theme::TEXT_MUTED).size(9)).width(38),
+            container(text("MEM").color(theme::TEXT_MUTED).size(9)).width(36),
+            container(text("CMD").color(theme::TEXT_MUTED).size(9)).width(Fill),
+        ]
+        .spacing(2)
+        .padding(Padding::from([4, 8]));
+
+        let mut proc_col = column![hdr_row, sidebar_divider()].spacing(0);
 
         for (i, p) in procs.iter().take(15).enumerate() {
-            let bar_len = ((p.cpu / 100.0) * 8.0).ceil() as usize;
-            let bar: String = "\u{2588}".repeat(bar_len.min(8));
-            let pad: String = "\u{2591}".repeat(8_usize.saturating_sub(bar_len));
-
-            let line = format!(
-                "{:>6} {:>5.1} {:>5.1}  {}",
-                p.pid, p.cpu, p.mem, truncate_str(&p.command, 12)
-            );
+            let bar_len = ((p.cpu / 100.0) * 6.0).ceil() as usize;
+            let bar: String = "\u{2588}".repeat(bar_len.min(6));
+            let pad: String = "\u{2591}".repeat(6_usize.saturating_sub(bar_len));
 
             let color = if p.cpu > 50.0 { theme::DANGER }
                        else if p.cpu > 20.0 { theme::WARNING }
                        else { theme::TEXT_SECONDARY };
             let row_bg = if i % 2 == 0 { theme::BG_SECONDARY } else { theme::BG_TERTIARY };
 
+            let pid_text = format!("{}", p.pid);
+            let cpu_text = format!("{:.1}", p.cpu);
+            let mem_text = format!("{:.1}", p.mem);
+            let cmd_text = truncate_str(&p.command, 10);
+
+            let proc_row = row![
+                container(text(pid_text).color(color).size(9)).width(42),
+                container(text(cpu_text).color(color).size(9)).width(38),
+                container(text(mem_text).color(color).size(9)).width(36),
+                text(cmd_text).color(color).size(9),
+                horizontal_space(),
+                text(format!("{}{}", bar, pad)).color(color).size(7).font(Font::MONOSPACE),
+            ]
+            .spacing(2)
+            .align_y(alignment::Vertical::Center);
+
             proc_col = proc_col.push(
-                container(
-                    row![
-                        text(line).color(color).size(9),
-                        horizontal_space(),
-                        text(format!("{}{}", bar, pad)).color(color).size(7).font(Font::MONOSPACE),
-                    ].align_y(alignment::Vertical::Center)
-                )
-                .padding(Padding::from([2, 8]))
-                .width(Fill)
-                .style(move |_| container::Style {
-                    background: Some(row_bg.into()),
-                    ..Default::default()
-                })
+                container(proc_row)
+                    .padding(Padding::from([3, 8]))
+                    .width(Fill)
+                    .style(move |_| container::Style {
+                        background: Some(row_bg.into()),
+                        ..Default::default()
+                    })
             );
         }
         col = col.push(proc_col);
