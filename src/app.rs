@@ -1349,11 +1349,23 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
         )));
         col = col.push(progress_bar_widget(stats.mem_percent));
 
-        // Disk
-        col = col.push(stat_row(">", &format!(
-            "Disk: {:.1} / {:.1} GB ({:.0}%)", stats.disk_used_gb, stats.disk_total_gb, stats.disk_percent
-        )));
-        col = col.push(progress_bar_widget(stats.disk_percent));
+        // Disks (all mount points)
+        if stats.disks.is_empty() {
+            col = col.push(stat_row(">", &format!(
+                "Disk: {:.1} / {:.1} GB ({:.0}%)", stats.disk_used_gb, stats.disk_total_gb, stats.disk_percent
+            )));
+            col = col.push(progress_bar_widget(stats.disk_percent));
+        } else {
+            for d in &stats.disks {
+                let label = format!(
+                    "{} {}/{}({:.0}%)",
+                    truncate_str(&d.mount_point, 10),
+                    d.used, d.total, d.percent,
+                );
+                col = col.push(stat_row(">", &label));
+                col = col.push(progress_bar_widget(d.percent));
+            }
+        }
 
         // Uptime
         if !stats.uptime.is_empty() {

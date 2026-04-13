@@ -31,6 +31,19 @@ pub struct NetInterface {
     pub tx_bytes: u64,
 }
 
+/// Per-mount-point disk usage.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiskInfo {
+    pub filesystem: String,
+    pub mount_point: String,
+    pub total: String,
+    pub used: String,
+    pub avail: String,
+    pub percent: f64,
+    pub total_gb: f64,
+    pub used_gb: f64,
+}
+
 /// Server resource statistics collected via SSH exec.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerStats {
@@ -50,6 +63,7 @@ pub struct ServerStats {
     pub net_tx_rate: String,
     pub uptime: String,
     pub interfaces: Vec<NetInterface>,
+    pub disks: Vec<DiskInfo>,
 }
 
 /// A single process entry from `ps aux`.
@@ -486,7 +500,7 @@ impl SshManager {
         // Single compound command for efficiency
         let cmd = "cat /proc/loadavg; echo '---SEPARATOR---'; \
                    free -m; echo '---SEPARATOR---'; \
-                   df -h / 2>/dev/null || df -h . 2>/dev/null; echo '---SEPARATOR---'; \
+                   df -hP -x tmpfs -x devtmpfs -x overlay 2>/dev/null || df -h / 2>/dev/null; echo '---SEPARATOR---'; \
                    cat /proc/net/dev 2>/dev/null; echo '---SEPARATOR---'; \
                    nproc 2>/dev/null || echo 1; echo '---SEPARATOR---'; \
                    uptime -p 2>/dev/null || uptime";
@@ -522,16 +536,37 @@ impl SshManager {
             }
         }
 
-        // Parse df -h /
+        // Parse df -hP (all real filesystems)
         if let Some(df_output) = sections.get(2) {
             for line in df_output.lines().skip(1) {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 5 {
-                    stats.disk_total_gb = parse_size_to_gb(parts[1]);
-                    stats.disk_used_gb = parse_size_to_gb(parts[2]);
-                    stats.disk_percent =
-                        parts[4].trim_end_matches('%').parse().unwrap_or(0.0);
-                    break;
+                if parts.len() >= 6 {
+                    let mount = parts[5];
+                    // Skip pseudo/system mounts
+                    if mount.starts_with("/snap") || mount.starts_with("/boot/efi") {
+                        continue;
+                    }
+                    let total_gb = parse_size_to_gb(parts[1]);
+                    let used_gb = parse_size_to_gb(parts[2]);
+                    let pct: f64 = parts[4].trim_end_matches('%').parse().unwrap_or(0.0);
+
+                    stats.disks.push(DiskInfo {
+                        filesystem: parts[0].to_string(),
+                        mount_point: mount.to_string(),
+                        total: parts[1].to_string(),
+                        used: parts[2].to_string(),
+                        avail: parts[3].to_string(),
+                        percent: pct,
+                        total_gb,
+                        used_gb,
+                    });
+
+                    // Keep root "/" as the summary stats
+                    if mount == "/" {
+                        stats.disk_total_gb = total_gb;
+                        stats.disk_used_gb = used_gb;
+                        stats.disk_percent = pct;
+                    }
                 }
             }
         }
