@@ -98,6 +98,9 @@ pub struct NeoShell {
 
     // Prevent duplicate tab creation during async connect
     connecting_ids: HashSet<String>,
+
+    // Quick-connect dialog (shows saved connections list)
+    show_connect_dialog: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +152,13 @@ pub enum Message {
     ConnectionsLoaded(Vec<ConnectionInfo>),
     ConnectTo(String),
     DeleteConnection(String),
+    ShowConnectDialog,
+    HideConnectDialog,
+
+    // Tab switching
+    SwitchToNextTab,
+    SwitchToPrevTab,
+    SwitchToTab(usize),
 
     // Form
     ShowForm(Option<String>),
@@ -253,6 +263,7 @@ impl Default for NeoShell {
             transfer_progress: None,
             selected_interface: None,
             connecting_ids: HashSet::new(),
+            show_connect_dialog: false,
         }
     }
 }
@@ -347,12 +358,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ConnectTo(id) => {
-            // Prevent duplicate: already connected — switch to tab
-            if let Some(idx) = state.tabs.iter().position(|t| t.connection_id == id) {
-                state.active_tab = Some(idx);
-                return Task::none();
-            }
-            // Prevent duplicate: already connecting (async in flight)
+            // Debounce: prevent double-click creating duplicate during async handshake
             if state.connecting_ids.contains(&id) {
                 return Task::none();
             }
@@ -374,6 +380,40 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                     Err(e) => Message::Error(e),
                 },
             )
+        }
+        Message::ShowConnectDialog => {
+            state.show_connect_dialog = true;
+            Task::done(Message::LoadConnections)
+        }
+        Message::HideConnectDialog => {
+            state.show_connect_dialog = false;
+            Task::none()
+        }
+        Message::SwitchToNextTab => {
+            if !state.tabs.is_empty() {
+                let next = match state.active_tab {
+                    Some(idx) => (idx + 1) % state.tabs.len(),
+                    None => 0,
+                };
+                state.active_tab = Some(next);
+            }
+            Task::none()
+        }
+        Message::SwitchToPrevTab => {
+            if !state.tabs.is_empty() {
+                let prev = match state.active_tab {
+                    Some(0) | None => state.tabs.len() - 1,
+                    Some(idx) => idx - 1,
+                };
+                state.active_tab = Some(prev);
+            }
+            Task::none()
+        }
+        Message::SwitchToTab(idx) => {
+            if idx < state.tabs.len() {
+                state.active_tab = Some(idx);
+            }
+            Task::none()
         }
         Message::DeleteConnection(id) => {
             let store = state.store.clone();
@@ -511,6 +551,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         // ---- terminal --------------------------------------------------------
         Message::SshConnected(tab_id, session_id, title, connection_id) => {
             state.connecting_ids.remove(&connection_id);
+            state.show_connect_dialog = false;
             let terminal = Arc::new(parking_lot::Mutex::new(TerminalGrid::new(80, 24)));
             let sid_for_fetch = session_id.clone();
             state.tabs.push(TerminalTab {
@@ -655,14 +696,55 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             if state.show_form { return Task::none(); }
             if state.selected_interface.is_some() { return Task::none(); }
 
-            // Cmd+V = paste from clipboard
+            // Cmd+key shortcuts
             if modifiers.command() {
                 if let keyboard::Key::Character(c) = &key {
-                    if c.as_str() == "v" {
-                        return Task::done(Message::PasteClipboard);
+                    match c.as_str() {
+                        "v" => return Task::done(Message::PasteClipboard),
+                        "t" => return Task::done(Message::ShowConnectDialog),
+                        "w" => {
+                            // Cmd+W = close current tab
+                            if let Some(idx) = state.active_tab {
+                                return Task::done(Message::TabClosed(idx));
+                            }
+                        }
+                        "1" => return Task::done(Message::SwitchToTab(0)),
+                        "2" => return Task::done(Message::SwitchToTab(1)),
+                        "3" => return Task::done(Message::SwitchToTab(2)),
+                        "4" => return Task::done(Message::SwitchToTab(3)),
+                        "5" => return Task::done(Message::SwitchToTab(4)),
+                        "6" => return Task::done(Message::SwitchToTab(5)),
+                        "7" => return Task::done(Message::SwitchToTab(6)),
+                        "8" => return Task::done(Message::SwitchToTab(7)),
+                        "9" => {
+                            // Cmd+9 = last tab
+                            if !state.tabs.is_empty() {
+                                return Task::done(Message::SwitchToTab(state.tabs.len() - 1));
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                return Task::none(); // Skip other Cmd+key
+                return Task::none();
+            }
+
+            // Ctrl+Tab / Ctrl+Shift+Tab = switch tabs
+            if modifiers.control() {
+                if let keyboard::Key::Named(keyboard::key::Named::Tab) = &key {
+                    return if modifiers.shift() {
+                        Task::done(Message::SwitchToPrevTab)
+                    } else {
+                        Task::done(Message::SwitchToNextTab)
+                    };
+                }
+            }
+
+            // Close connect dialog with ESC
+            if state.show_connect_dialog {
+                if let keyboard::Key::Named(keyboard::key::Named::Escape) = &key {
+                    state.show_connect_dialog = false;
+                    return Task::none();
+                }
             }
 
             if let Some(idx) = state.active_tab {
@@ -1155,6 +1237,18 @@ fn view_main(state: &NeoShell) -> Element<'_, Message> {
         .into();
     }
 
+    // Quick-connect dialog
+    if state.show_connect_dialog {
+        let dialog = view_connect_dialog(state);
+        return container(stack([
+            container(main_layout).width(Fill).height(Fill).into(),
+            dialog,
+        ]))
+        .width(Fill)
+        .height(Fill)
+        .into();
+    }
+
     // Modal overlay for connection form
     if state.show_form {
         let form_overlay = view_connection_form_overlay(state);
@@ -1251,7 +1345,13 @@ fn view_tab_bar(state: &NeoShell) -> Element<'_, Message> {
         );
     }
 
-    // Fill remaining space with empty bar
+    // "+" button to open new connection + fill remaining space
+    tabs_row = tabs_row.push(
+        button(text("+").color(theme::TEXT_MUTED).size(14))
+            .on_press(Message::ShowConnectDialog)
+            .padding(Padding::from([6, 10]))
+            .style(transparent_button_style),
+    );
     tabs_row = tabs_row.push(horizontal_space());
 
     container(tabs_row)
@@ -1399,7 +1499,7 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
             text("System").color(theme::TEXT_PRIMARY).size(13),
             horizontal_space(),
             button(text("+").color(theme::ACCENT).size(16))
-                .on_press(Message::ShowForm(None))
+                .on_press(Message::ShowConnectDialog)
                 .padding(Padding::from([2, 6]))
                 .style(transparent_button_style),
         ]
@@ -1909,6 +2009,94 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
 }
 
 // ---- Network detail popup ------------------------------------------------
+
+// ---- Quick-connect dialog (open new tab to any saved connection) ----------
+
+fn view_connect_dialog(state: &NeoShell) -> Element<'_, Message> {
+    let title = row![
+        text("Connect to Server").color(theme::TEXT_PRIMARY).size(18),
+        horizontal_space(),
+        button(text("+ New").color(theme::ACCENT).size(13))
+            .on_press(Message::ShowForm(None))
+            .padding(Padding::from([4, 12]))
+            .style(transparent_button_style),
+        button(text("x").color(theme::TEXT_MUTED).size(14))
+            .on_press(Message::HideConnectDialog)
+            .padding(Padding::from([4, 8]))
+            .style(transparent_button_style),
+    ]
+    .align_y(alignment::Vertical::Center);
+
+    let mut list_col = column![].spacing(2);
+
+    if state.connections.is_empty() {
+        list_col = list_col.push(
+            container(text("No saved connections").color(theme::TEXT_MUTED).size(13))
+                .padding(Padding::from([16, 12])),
+        );
+    } else {
+        for conn in &state.connections {
+            let dot_color = theme::SUCCESS;
+            let conn_id = conn.id.clone();
+
+            let conn_row = row![
+                text("\u{25CF} ").color(dot_color).size(10),
+                column![
+                    text(&conn.name).color(theme::TEXT_PRIMARY).size(14),
+                    text(format!("{}@{}:{}", conn.username, conn.host, conn.port))
+                        .color(theme::TEXT_MUTED).size(11),
+                ].spacing(2),
+                horizontal_space(),
+                text(&conn.group).color(theme::TEXT_MUTED).size(10),
+            ]
+            .align_y(alignment::Vertical::Center)
+            .spacing(8);
+
+            list_col = list_col.push(
+                button(conn_row)
+                    .on_press(Message::ConnectTo(conn_id))
+                    .padding(Padding::from([8, 12]))
+                    .width(Fill)
+                    .style(sidebar_item_style),
+            );
+        }
+    }
+
+    let hint = text("Cmd+T open | Cmd+1-9 switch tabs | Ctrl+Tab next | Cmd+W close")
+        .color(theme::TEXT_MUTED)
+        .size(10);
+
+    let content = column![title, scrollable(list_col).height(300), hint]
+        .spacing(12)
+        .padding(24)
+        .width(480);
+
+    let card = container(content).style(|_| container::Style {
+        background: Some(theme::BG_SECONDARY.into()),
+        border: iced::Border {
+            color: theme::BORDER,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 24.0,
+        },
+        ..Default::default()
+    });
+
+    container(card)
+        .width(Fill)
+        .height(Fill)
+        .center_x(Fill)
+        .center_y(Fill)
+        .style(|_| container::Style {
+            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.6).into()),
+            ..Default::default()
+        })
+        .into()
+}
 
 fn view_network_detail(state: &NeoShell) -> Element<'_, Message> {
     let iface = match &state.selected_interface {
