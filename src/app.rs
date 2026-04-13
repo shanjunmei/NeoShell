@@ -1023,8 +1023,6 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                 async {
                     let file = rfd::AsyncFileDialog::new()
                         .set_title("Select Private Key")
-                        .add_filter("All files", &["*"])
-                        .add_filter("PEM files", &["pem", "key"])
                         .set_directory(dirs::home_dir().unwrap_or_default().join(".ssh"))
                         .pick_file()
                         .await;
