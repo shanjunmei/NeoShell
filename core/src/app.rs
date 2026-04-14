@@ -16,6 +16,7 @@ use std::time::Duration;
 use crate::ssh::{FileEntry, ProcessInfo, ServerStats, SshEvent, SshManager, TransferProgress};
 use crate::storage::{ConnectionConfig, ConnectionInfo, ConnectionStore};
 use crate::terminal::TerminalGrid;
+use crate::i18n;
 use crate::ui::theme;
 use crate::updater::Updater;
 
@@ -233,6 +234,9 @@ pub struct NeoShell {
     // Auto-updater
     updater: Updater,
     last_update_check: std::time::Instant,
+
+    // i18n locale
+    locale: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -376,6 +380,9 @@ pub enum Message {
     RestartForUpdate,
     DismissUpdate,
 
+    // Language
+    ToggleLanguage,
+
     // Misc
     Tick,
     None,
@@ -385,6 +392,38 @@ pub enum Message {
 // ---------------------------------------------------------------------------
 // Default (initial state before run_with)
 // ---------------------------------------------------------------------------
+
+/// Load persisted locale preference or detect from system.
+fn load_locale() -> String {
+    if let Some(config_dir) = dirs::config_dir() {
+        let lang_file = config_dir.join("neoshell").join("lang");
+        if let Ok(lang) = std::fs::read_to_string(&lang_file) {
+            let lang = lang.trim().to_string();
+            if !lang.is_empty() {
+                return lang;
+            }
+        }
+    }
+    // Auto-detect: check LANG / LC_ALL env
+    for var in &["LC_ALL", "LANG", "LANGUAGE"] {
+        if let Ok(val) = std::env::var(var) {
+            let lower = val.to_lowercase();
+            if lower.starts_with("zh") {
+                return "zh-CN".to_string();
+            }
+        }
+    }
+    "en".to_string()
+}
+
+/// Persist locale choice to config dir.
+fn save_locale(locale: &str) {
+    if let Some(config_dir) = dirs::config_dir() {
+        let neo_dir = config_dir.join("neoshell");
+        let _ = std::fs::create_dir_all(&neo_dir);
+        let _ = std::fs::write(neo_dir.join("lang"), locale);
+    }
+}
 
 impl Default for NeoShell {
     fn default() -> Self {
@@ -396,6 +435,9 @@ impl Default for NeoShell {
         } else {
             Screen::Setup
         };
+
+        let locale = load_locale();
+        i18n::set_locale(&locale);
 
         Self {
             screen,
@@ -437,6 +479,7 @@ impl Default for NeoShell {
             selecting: false,
             updater: Updater::new(),
             last_update_check: std::time::Instant::now(),
+            locale,
         }
     }
 }
@@ -473,11 +516,11 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         }
         Message::CreateVault => {
             if state.password_input.len() < 4 {
-                state.error_message = "Password must be at least 4 characters".into();
+                state.error_message = i18n::t("setup.err_too_short").to_string();
                 return Task::none();
             }
             if state.password_input != state.confirm_input {
-                state.error_message = "Passwords do not match".into();
+                state.error_message = i18n::t("setup.err_mismatch").to_string();
                 return Task::none();
             }
             let store = state.store.clone();
@@ -504,7 +547,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                 async move { store.unlock(&pw) },
                 |result| match result {
                     Ok(true) => Message::VaultUnlocked,
-                    Ok(false) => Message::Error("Invalid password".into()),
+                    Ok(false) => Message::Error(i18n::t("unlock.err_invalid").to_string()),
                     Err(e) => Message::Error(e),
                 },
             )
@@ -1250,7 +1293,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                             .or_else(dirs::desktop_dir)
                             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
                         let file = rfd::AsyncFileDialog::new()
-                            .set_title("Select file to upload")
+                            .set_title(i18n::t("filedialog.upload"))
                             .set_directory(&default_dir)
                             .pick_file()
                             .await;
@@ -1297,7 +1340,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
 
                     let save_path = rfd::AsyncFileDialog::new()
-                        .set_title("Save file as")
+                        .set_title(i18n::t("filedialog.save"))
                         .set_file_name(&filename)
                         .set_directory(&default_dir)
                         .save_file()
@@ -1396,7 +1439,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::perform(
                 async {
                     let file = rfd::AsyncFileDialog::new()
-                        .set_title("Select Private Key")
+                        .set_title(i18n::t("filedialog.select_key"))
                         .set_directory(dirs::home_dir().unwrap_or_default().join(".ssh"))
                         .pick_file()
                         .await;
@@ -1451,7 +1494,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                         .or_else(dirs::desktop_dir)
                         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
                     let file = rfd::AsyncFileDialog::new()
-                        .set_title("rz: Select file to upload")
+                        .set_title(i18n::t("filedialog.rz_upload"))
                         .set_directory(&default_dir)
                         .pick_file()
                         .await;
@@ -1650,6 +1693,18 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
 
+        // ---- language --------------------------------------------------------
+        Message::ToggleLanguage => {
+            state.locale = if state.locale == "zh-CN" {
+                "en".to_string()
+            } else {
+                "zh-CN".to_string()
+            };
+            i18n::set_locale(&state.locale);
+            save_locale(&state.locale);
+            Task::none()
+        }
+
         // ---- misc ------------------------------------------------------------
         Message::Tick => Task::none(),
         Message::None => Task::none(),
@@ -1777,22 +1832,22 @@ fn view(state: &NeoShell) -> Element<'_, Message> {
 // ---- Setup screen --------------------------------------------------------
 
 fn view_setup(state: &NeoShell) -> Element<'_, Message> {
-    let title = text("Welcome to NeoShell")
+    let title = text(i18n::t("setup.title"))
         .size(28)
         .color(theme::TEXT_PRIMARY);
 
-    let subtitle = text("Create a master password to protect your connections")
+    let subtitle = text(i18n::t("setup.subtitle"))
         .size(14)
         .color(theme::TEXT_SECONDARY);
 
-    let pw_input = text_input("Master password", &state.password_input)
+    let pw_input = text_input(&i18n::t("setup.password_placeholder"), &state.password_input)
         .on_input(Message::PasswordChanged)
         .secure(true)
         .padding(10)
         .size(16)
         .id(iced::widget::text_input::Id::new("setup_pw"));
 
-    let confirm_input = text_input("Confirm password", &state.confirm_input)
+    let confirm_input = text_input(&i18n::t("setup.confirm_placeholder"), &state.confirm_input)
         .on_input(Message::ConfirmChanged)
         .on_submit(Message::CreateVault)
         .secure(true)
@@ -1801,7 +1856,7 @@ fn view_setup(state: &NeoShell) -> Element<'_, Message> {
         .id(iced::widget::text_input::Id::new("setup_confirm"));
 
     let create_btn = button(
-        text("Create Vault").color(theme::TEXT_PRIMARY).size(16),
+        text(i18n::t("setup.create_vault")).color(theme::TEXT_PRIMARY).size(16),
     )
     .on_press(Message::CreateVault)
     .padding(Padding::from([10, 24]))
@@ -1830,15 +1885,15 @@ fn view_setup(state: &NeoShell) -> Element<'_, Message> {
 // ---- Unlock screen -------------------------------------------------------
 
 fn view_unlock(state: &NeoShell) -> Element<'_, Message> {
-    let title = text("NeoShell")
+    let title = text(i18n::t("unlock.title"))
         .size(28)
         .color(theme::TEXT_PRIMARY);
 
-    let subtitle = text("Enter master password to unlock")
+    let subtitle = text(i18n::t("unlock.subtitle"))
         .size(14)
         .color(theme::TEXT_SECONDARY);
 
-    let pw_input = text_input("Master password", &state.password_input)
+    let pw_input = text_input(&i18n::t("unlock.password_placeholder"), &state.password_input)
         .on_input(Message::PasswordChanged)
         .on_submit(Message::UnlockVault)
         .secure(true)
@@ -1846,7 +1901,7 @@ fn view_unlock(state: &NeoShell) -> Element<'_, Message> {
         .size(16);
 
     let unlock_btn = button(
-        text("Unlock").color(theme::TEXT_PRIMARY).size(16),
+        text(i18n::t("unlock.btn")).color(theme::TEXT_PRIMARY).size(16),
     )
     .on_press(Message::UnlockVault)
     .padding(Padding::from([10, 24]))
@@ -1988,10 +2043,12 @@ fn view_main(state: &NeoShell) -> Element<'_, Message> {
 // ---- Welcome screen (no active tab) --------------------------------------
 
 fn view_welcome() -> Element<'static, Message> {
+    let wtitle = i18n::t("welcome.title").to_string();
+    let wsub = i18n::t("welcome.subtitle").to_string();
     let placeholder = column![
         vertical_space().height(80),
-        text("NeoShell").size(36).color(theme::TEXT_MUTED),
-        text("Select a connection from the sidebar to begin")
+        text(wtitle).size(36).color(theme::TEXT_MUTED),
+        text(wsub)
             .size(14)
             .color(theme::TEXT_MUTED),
     ]
@@ -2023,15 +2080,15 @@ fn view_update_bar(state: &NeoShell) -> Option<Element<'_, Message>> {
         Some(
             container(
                 row![
-                    text(format!("NeoShell {} ready", version))
+                    text(i18n::tf("update.ready", &[("version", &version)]))
                         .color(theme::SUCCESS)
                         .size(12),
                     horizontal_space(),
-                    button(text("Restart Now").color(Color::WHITE).size(11))
+                    button(text(i18n::t("update.restart")).color(Color::WHITE).size(11))
                         .on_press(Message::RestartForUpdate)
                         .padding(Padding::from([4, 14]))
                         .style(accent_button_style),
-                    button(text("Later").color(theme::TEXT_MUTED).size(11))
+                    button(text(i18n::t("update.later")).color(theme::TEXT_MUTED).size(11))
                         .on_press(Message::DismissUpdate)
                         .padding(Padding::from([4, 8]))
                         .style(transparent_button_style),
@@ -2055,11 +2112,7 @@ fn view_update_bar(state: &NeoShell) -> Option<Element<'_, Message>> {
         // Download in progress
         Some(
             container(
-                row![text(format!(
-                    "Downloading v{}... {:.0}%",
-                    version,
-                    progress * 100.0
-                ))
+                row![text(i18n::tf("update.downloading", &[("version", &version), ("percent", &format!("{:.0}", progress * 100.0))]))
                 .color(theme::ACCENT)
                 .size(12),]
                 .padding(Padding::from([6, 16])),
@@ -2076,11 +2129,11 @@ fn view_update_bar(state: &NeoShell) -> Option<Element<'_, Message>> {
         Some(
             container(
                 row![
-                    text(format!("Update available: v{}", version))
+                    text(i18n::tf("update.available", &[("version", &version)]))
                         .color(theme::ACCENT)
                         .size(12),
                     horizontal_space(),
-                    button(text("Download").color(Color::WHITE).size(11))
+                    button(text(i18n::t("update.download_btn")).color(Color::WHITE).size(11))
                         .on_press(Message::DownloadUpdate)
                         .padding(Padding::from([4, 14]))
                         .style(accent_button_style),
@@ -2165,7 +2218,7 @@ fn view_tab_bar(state: &NeoShell) -> Element<'_, Message> {
     // If no tabs, show placeholder
     if state.tabs.is_empty() {
         tabs_row = tabs_row.push(
-            container(text("No open tabs").color(theme::TEXT_MUTED).size(12))
+            container(text(i18n::t("tab.no_tabs")).color(theme::TEXT_MUTED).size(12))
                 .padding(Padding::from([8, 14])),
         );
     }
@@ -2193,7 +2246,7 @@ fn view_tab_bar(state: &NeoShell) -> Element<'_, Message> {
 
 fn view_sidebar(state: &NeoShell) -> Element<'_, Message> {
     let header = row![
-        text("Connections").color(theme::TEXT_PRIMARY).size(15),
+        text(i18n::t("sidebar.connections")).color(theme::TEXT_PRIMARY).size(15),
         horizontal_space(),
         button(text("+").color(theme::ACCENT).size(18))
             .on_press(Message::ShowForm(None))
@@ -2203,7 +2256,7 @@ fn view_sidebar(state: &NeoShell) -> Element<'_, Message> {
     .align_y(alignment::Vertical::Center)
     .padding(Padding::from([8, 12]));
 
-    let search = text_input("Search...", &state.search_query)
+    let search = text_input(&i18n::t("sidebar.search"), &state.search_query)
         .on_input(Message::SearchChanged)
         .padding(8)
         .size(13);
@@ -2230,7 +2283,7 @@ fn view_sidebar(state: &NeoShell) -> Element<'_, Message> {
     let mut groups: HashMap<String, Vec<&ConnectionInfo>> = HashMap::new();
     for conn in &filtered {
         let group_name = if conn.group.is_empty() {
-            "Ungrouped".to_string()
+            i18n::t("sidebar.ungrouped").to_string()
         } else {
             conn.group.clone()
         };
@@ -2279,7 +2332,7 @@ fn view_sidebar(state: &NeoShell) -> Element<'_, Message> {
     if filtered.is_empty() {
         list_col = list_col.push(
             container(
-                text("No connections found")
+                text(i18n::t("sidebar.no_results"))
                     .color(theme::TEXT_MUTED)
                     .size(13),
             )
@@ -2321,7 +2374,7 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
     // ── Header ──────────────────────────────────────────────────────────
     let header = container(
         row![
-            text("System").color(theme::TEXT_PRIMARY).size(13),
+            text(i18n::t("monitor.system")).color(theme::TEXT_PRIMARY).size(13),
             horizontal_space(),
             button(text("+").color(theme::ACCENT).size(16))
                 .on_press(Message::ShowConnectDialog)
@@ -2340,18 +2393,18 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
 
     if let Some(stats) = stats {
         // Load — label left, values right
-        col = col.push(sys_row("Load",
+        col = col.push(sys_row(&i18n::t("monitor.load"),
             &format!("{:.2} / {:.2} / {:.2}", stats.load_1m, stats.load_5m, stats.load_15m)));
-        col = col.push(sys_row("CPU", &format!("{} cores", stats.cpu_cores)));
+        col = col.push(sys_row(i18n::t("monitor.cpu"), &i18n::tf("monitor.cpu_cores", &[("count", &stats.cpu_cores.to_string())])));
 
         // Memory — label left, usage right + progress bar
-        col = col.push(sys_row("Mem",
+        col = col.push(sys_row(&i18n::t("monitor.mem"),
             &format!("{} / {} MB ({:.0}%)", stats.mem_used_mb, stats.mem_total_mb, stats.mem_percent)));
         col = col.push(progress_bar_widget(stats.mem_percent));
 
         // Disks
         if stats.disks.is_empty() {
-            col = col.push(sys_row("Disk",
+            col = col.push(sys_row(&i18n::t("monitor.disk"),
                 &format!("{:.1} / {:.1} GB ({:.0}%)", stats.disk_used_gb, stats.disk_total_gb, stats.disk_percent)));
             col = col.push(progress_bar_widget(stats.disk_percent));
         } else {
@@ -2366,11 +2419,11 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
 
         // Uptime
         if !stats.uptime.is_empty() {
-            col = col.push(sys_row("Up", &stats.uptime));
+            col = col.push(sys_row(&i18n::t("monitor.uptime"), &stats.uptime));
         }
     } else {
         col = col.push(
-            container(text("Connecting...").color(theme::TEXT_MUTED).size(12))
+            container(text(i18n::t("monitor.connecting")).color(theme::TEXT_MUTED).size(12))
                 .padding(Padding::from([8, 10])),
         );
     }
@@ -2379,15 +2432,15 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
     col = col.push(sidebar_divider());
 
     // ── Top Processes (BEFORE Network) ──────────────────────────────────
-    col = col.push(section_header("Top Processes"));
+    col = col.push(section_header(&i18n::t("monitor.processes")));
 
     if let Some(procs) = processes {
         // Column-aligned header
         let hdr_row = row![
-            container(text("PID").color(theme::TEXT_MUTED).size(9)).width(42),
-            container(text("CPU").color(theme::TEXT_MUTED).size(9)).width(38),
-            container(text("MEM").color(theme::TEXT_MUTED).size(9)).width(36),
-            container(text("CMD").color(theme::TEXT_MUTED).size(9)).width(Fill),
+            container(text(i18n::t("monitor.pid")).color(theme::TEXT_MUTED).size(9)).width(42),
+            container(text(i18n::t("monitor.proc_cpu")).color(theme::TEXT_MUTED).size(9)).width(38),
+            container(text(i18n::t("monitor.proc_mem")).color(theme::TEXT_MUTED).size(9)).width(36),
+            container(text(i18n::t("monitor.proc_cmd")).color(theme::TEXT_MUTED).size(9)).width(Fill),
         ]
         .spacing(2)
         .padding(Padding::from([4, 8]));
@@ -2433,7 +2486,7 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
         col = col.push(proc_col);
     } else {
         col = col.push(
-            container(text("Loading...").color(theme::TEXT_MUTED).size(11))
+            container(text(i18n::t("monitor.loading")).color(theme::TEXT_MUTED).size(11))
                 .padding(Padding::from([8, 10])),
         );
     }
@@ -2442,7 +2495,7 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
     col = col.push(sidebar_divider());
 
     // ── Network (compact: only physical + total, clickable) ─────────────
-    col = col.push(section_header("Network"));
+    col = col.push(section_header(&i18n::t("monitor.network")));
 
     if let Some(stats) = stats {
         // Filter: skip lo, show physical first, then virtual (limit 5)
@@ -2484,7 +2537,7 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
             let virt_rx: u64 = virtual_ifs.iter().map(|i| i.rx_bytes).sum();
             let virt_tx: u64 = virtual_ifs.iter().map(|i| i.tx_bytes).sum();
             let virt_row = row![
-                container(text(format!("virtual({})", virtual_ifs.len())).color(theme::TEXT_MUTED).size(10)).width(Fill),
+                container(text(i18n::tf("monitor.virtual_count", &[("count", &virtual_ifs.len().to_string())])).color(theme::TEXT_MUTED).size(10)).width(Fill),
                 container(text(format!("\u{2193}{}", format_bytes(virt_rx))).color(theme::TEXT_MUTED).size(9))
                     .width(80).align_x(alignment::Horizontal::Right),
                 container(text(format!("\u{2191}{}", format_bytes(virt_tx))).color(theme::TEXT_MUTED).size(9))
@@ -2495,7 +2548,7 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
 
         // Total
         let total_row = row![
-            container(text("Total").color(theme::TEXT_SECONDARY).size(10)).width(Fill),
+            container(text(i18n::t("monitor.total")).color(theme::TEXT_SECONDARY).size(10)).width(Fill),
             container(text(format!("\u{2193}{}", format_bytes(stats.net_rx_bytes))).color(theme::TEXT_SECONDARY).size(9))
                 .width(80).align_x(alignment::Horizontal::Right),
             container(text(format!("\u{2191}{}", format_bytes(stats.net_tx_bytes))).color(theme::TEXT_SECONDARY).size(9))
@@ -2509,11 +2562,10 @@ fn view_monitor_sidebar(state: &NeoShell) -> Element<'_, Message> {
             let tx_rate = state.net_tx_rate.get(sid).copied().unwrap_or(0.0);
             col = col.push(
                 container(
-                    text(format!(
-                        "Speed: \u{2193}{}/s \u{2191}{}/s",
-                        format_bytes(rx_rate as u64),
-                        format_bytes(tx_rate as u64),
-                    ))
+                    text(i18n::tf("monitor.speed", &[
+                        ("down", &format_bytes(rx_rate as u64)),
+                        ("up", &format_bytes(tx_rate as u64)),
+                    ]))
                     .color(theme::SUCCESS)
                     .size(10)
                 )
@@ -2691,11 +2743,11 @@ fn view_transfer_progress(progress: &TransferProgress) -> Element<'static, Messa
             speed
         )
     } else {
-        format!("{} — preparing...", filename)
+        i18n::tf("transfer.preparing", &[("name", &filename)])
     };
 
     let progress_text = text(label).color(theme::TEXT_PRIMARY).size(11);
-    let cancel_btn = button(text("Cancel").color(theme::DANGER).size(11))
+    let cancel_btn = button(text(i18n::t("transfer.cancel")).color(theme::DANGER).size(11))
         .on_press(Message::CancelTransfer)
         .padding(Padding::from([2, 8]))
         .style(transparent_button_style);
@@ -2757,11 +2809,11 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
     let entries = state.file_entries.get(&sid);
 
     // Header with path and upload button
-    let path_label = text(format!("[DIR] {}", current_path))
+    let path_label = text(i18n::tf("filebrowser.dir", &[("path", current_path)]))
         .color(theme::TEXT_PRIMARY)
         .size(12);
 
-    let upload_btn = button(text("^ Upload").color(theme::SUCCESS).size(11))
+    let upload_btn = button(text(i18n::t("filebrowser.upload")).color(theme::SUCCESS).size(11))
         .on_press(Message::UploadFile)
         .padding(Padding::from([4, 8]))
         .style(transparent_button_style);
@@ -2876,7 +2928,7 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
         }
     } else {
         file_col = file_col.push(
-            container(text("Loading files...").color(theme::TEXT_MUTED).size(12))
+            container(text(i18n::t("filebrowser.loading")).color(theme::TEXT_MUTED).size(12))
                 .padding(Padding::from([8, 10])),
         );
     }
@@ -2892,9 +2944,9 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
 
 fn view_connect_dialog(state: &NeoShell) -> Element<'_, Message> {
     let title = row![
-        text("Connect to Server").color(theme::TEXT_PRIMARY).size(18),
+        text(i18n::t("dialog.connect_title")).color(theme::TEXT_PRIMARY).size(18),
         horizontal_space(),
-        button(text("+ New").color(theme::ACCENT).size(13))
+        button(text(i18n::t("dialog.new_btn")).color(theme::ACCENT).size(13))
             .on_press(Message::ShowForm(None))
             .padding(Padding::from([4, 12]))
             .style(transparent_button_style),
@@ -2909,7 +2961,7 @@ fn view_connect_dialog(state: &NeoShell) -> Element<'_, Message> {
 
     if state.connections.is_empty() {
         list_col = list_col.push(
-            container(text("No saved connections").color(theme::TEXT_MUTED).size(13))
+            container(text(i18n::t("dialog.no_saved")).color(theme::TEXT_MUTED).size(13))
                 .padding(Padding::from([16, 12])),
         );
     } else {
@@ -2935,12 +2987,12 @@ fn view_connect_dialog(state: &NeoShell) -> Element<'_, Message> {
             .padding(Padding::from([8, 8]))
             .style(sidebar_item_style);
 
-            let edit_btn = button(text("Edit").color(theme::ACCENT).size(11))
+            let edit_btn = button(text(i18n::t("dialog.edit")).color(theme::ACCENT).size(11))
                 .on_press(Message::ShowForm(Some(conn_id_edit)))
                 .padding(Padding::from([4, 8]))
                 .style(transparent_button_style);
 
-            let del_btn = button(text("Del").color(theme::DANGER).size(11))
+            let del_btn = button(text(i18n::t("dialog.delete")).color(theme::DANGER).size(11))
                 .on_press(Message::DeleteConnection(conn_id_del))
                 .padding(Padding::from([4, 8]))
                 .style(transparent_button_style);
@@ -2965,7 +3017,7 @@ fn view_connect_dialog(state: &NeoShell) -> Element<'_, Message> {
     if !ssh_configs.is_empty() {
         list_col = list_col.push(
             container(
-                text("From ~/.ssh/config")
+                text(i18n::t("dialog.ssh_config"))
                     .color(theme::TEXT_MUTED)
                     .size(11),
             )
@@ -2994,7 +3046,7 @@ fn view_connect_dialog(state: &NeoShell) -> Element<'_, Message> {
                 ]
                 .spacing(2),
                 horizontal_space(),
-                text("ssh config").color(theme::TEXT_MUTED).size(9),
+                text(i18n::t("dialog.ssh_config_label")).color(theme::TEXT_MUTED).size(9),
             ]
             .align_y(alignment::Vertical::Center)
             .spacing(8);
@@ -3009,7 +3061,7 @@ fn view_connect_dialog(state: &NeoShell) -> Element<'_, Message> {
         }
     }
 
-    let hint = text("Cmd+T open | Cmd+1-9 switch tabs | Ctrl+Tab next | Cmd+W close")
+    let hint = text(i18n::t("dialog.keyboard_hint"))
         .color(theme::TEXT_MUTED)
         .size(10);
 
@@ -3045,16 +3097,46 @@ fn view_connect_dialog(state: &NeoShell) -> Element<'_, Message> {
         .into()
 }
 
+fn net_detail_labels(iface_name: &str) -> (String, String, String, String, String, String, String, String) {
+    let title = i18n::tf("netdetail.title", &[("name", iface_name)]);
+    let close = i18n::t("netdetail.close").to_string();
+    let lbl_iface = i18n::t("netdetail.interface").to_string();
+    let lbl_rx = i18n::t("netdetail.rx").to_string();
+    let lbl_tx = i18n::t("netdetail.tx").to_string();
+    let lbl_total = i18n::t("netdetail.total_traffic").to_string();
+    let lbl_type = i18n::t("netdetail.type").to_string();
+    let if_type = if iface_name.starts_with("eth") || iface_name.starts_with("en") {
+        i18n::t("netdetail.ethernet")
+    } else if iface_name.starts_with("wl") {
+        i18n::t("netdetail.wireless")
+    } else if iface_name.starts_with("br-") || iface_name.starts_with("docker") {
+        i18n::t("netdetail.docker")
+    } else if iface_name.starts_with("veth") {
+        i18n::t("netdetail.veth")
+    } else if iface_name.starts_with("bond") {
+        i18n::t("netdetail.bond")
+    } else if iface_name.starts_with("tun") || iface_name.starts_with("tap") {
+        i18n::t("netdetail.vpn")
+    } else if iface_name.starts_with("lo") {
+        i18n::t("netdetail.loopback")
+    } else {
+        i18n::t("netdetail.other")
+    }.to_string();
+    (title, close, lbl_iface, lbl_rx, lbl_tx, lbl_total, lbl_type, if_type)
+}
+
 fn view_network_detail(state: &NeoShell) -> Element<'_, Message> {
     let iface = match &state.selected_interface {
         Some(i) => i,
         None => return Space::new(0, 0).into(),
     };
 
-    let title = text(format!("Interface: {}", iface.name))
-        .color(theme::TEXT_PRIMARY).size(16);
+    let (title_str, close_str, lbl_iface, lbl_rx, lbl_tx, lbl_total, lbl_type, if_type_str)
+        = net_detail_labels(&iface.name);
 
-    let close_btn = button(text("Close").color(theme::TEXT_SECONDARY).size(13))
+    let title = text(title_str).color(theme::TEXT_PRIMARY).size(16);
+
+    let close_btn = button(text(close_str).color(theme::TEXT_SECONDARY).size(13))
         .on_press(Message::HideNetworkDetail)
         .padding(Padding::from([6, 16]))
         .style(transparent_button_style);
@@ -3067,30 +3149,11 @@ fn view_network_detail(state: &NeoShell) -> Element<'_, Message> {
     let total = format_bytes(iface.rx_bytes + iface.tx_bytes);
 
     let mut info_col = column![].spacing(8);
-    info_col = info_col.push(detail_row("Interface", &iface.name));
-    info_col = info_col.push(detail_row("Received (Rx)", &rx_text));
-    info_col = info_col.push(detail_row("Transmitted (Tx)", &tx_text));
-    info_col = info_col.push(detail_row("Total Traffic", &total));
-
-    // Determine interface type
-    let if_type = if iface.name.starts_with("eth") || iface.name.starts_with("en") {
-        "Ethernet"
-    } else if iface.name.starts_with("wl") {
-        "Wireless"
-    } else if iface.name.starts_with("br-") || iface.name.starts_with("docker") {
-        "Docker Bridge"
-    } else if iface.name.starts_with("veth") {
-        "Virtual Ethernet (Container)"
-    } else if iface.name.starts_with("bond") {
-        "Bond"
-    } else if iface.name.starts_with("tun") || iface.name.starts_with("tap") {
-        "VPN Tunnel"
-    } else if iface.name.starts_with("lo") {
-        "Loopback"
-    } else {
-        "Other"
-    };
-    info_col = info_col.push(detail_row("Type", if_type));
+    info_col = info_col.push(detail_row(&lbl_iface, &iface.name));
+    info_col = info_col.push(detail_row(&lbl_rx, &rx_text));
+    info_col = info_col.push(detail_row(&lbl_tx, &tx_text));
+    info_col = info_col.push(detail_row(&lbl_total, &total));
+    info_col = info_col.push(detail_row(&lbl_type, &if_type_str));
 
     let content = column![header, info_col].spacing(16).padding(24).width(380);
 
@@ -3141,12 +3204,12 @@ fn view_editor(state: &NeoShell) -> Element<'_, Message> {
 
     let title = text(title_text).color(theme::TEXT_PRIMARY).size(14);
 
-    let save_btn = button(text("Save").color(theme::TEXT_PRIMARY).size(13))
+    let save_btn = button(text(i18n::t("editor.save")).color(theme::TEXT_PRIMARY).size(13))
         .on_press(Message::SaveEditor)
         .padding(Padding::from([6, 16]))
         .style(accent_button_style);
 
-    let close_btn = button(text("Close").color(theme::TEXT_SECONDARY).size(13))
+    let close_btn = button(text(i18n::t("editor.close")).color(theme::TEXT_SECONDARY).size(13))
         .on_press(Message::CloseEditor)
         .padding(Padding::from([6, 16]))
         .style(transparent_button_style);
@@ -3212,7 +3275,7 @@ fn view_editor(state: &NeoShell) -> Element<'_, Message> {
 // ---- Status bar ----------------------------------------------------------
 
 fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
-    let left = text(format!("NeoShell v{}", env!("CARGO_PKG_VERSION"))).color(theme::TEXT_MUTED).size(12);
+    let left = text(i18n::tf("status.version", &[("version", env!("CARGO_PKG_VERSION"))])).color(theme::TEXT_MUTED).size(12);
 
     let right = if let Some(idx) = state.active_tab {
         if let Some(tab) = state.tabs.get(idx) {
@@ -3221,10 +3284,17 @@ fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
             text("").size(12)
         }
     } else {
-        text("No active session").color(theme::TEXT_MUTED).size(12)
+        text(i18n::t("status.no_session")).color(theme::TEXT_MUTED).size(12)
     };
 
-    let bar = row![left, horizontal_space(), right]
+    let lang_label = if state.locale == "zh-CN" { "EN" } else { "中文" };
+    let lang_btn = button(text(lang_label).color(theme::ACCENT).size(11))
+        .on_press(Message::ToggleLanguage)
+        .padding(Padding::from([2, 8]))
+        .style(transparent_button_style);
+
+    let bar = row![left, horizontal_space(), lang_btn, right]
+        .spacing(8)
         .padding(Padding::from([4, 12]))
         .align_y(alignment::Vertical::Center);
 
@@ -3247,25 +3317,25 @@ fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
 
 fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
     let title_text = if state.edit_id.is_some() {
-        "Edit Connection"
+        i18n::t("form.edit_title")
     } else {
-        "New Connection"
+        i18n::t("form.new_title")
     };
 
     let title = text(title_text).size(20).color(theme::TEXT_PRIMARY);
 
-    let name_input = labeled_input("Name", &state.form.name, Message::FormNameChanged);
-    let host_input = labeled_input("Host", &state.form.host, Message::FormHostChanged);
-    let port_input = labeled_input("Port", &state.form.port, Message::FormPortChanged);
+    let name_input = labeled_input(&i18n::t("form.name"), &state.form.name, Message::FormNameChanged);
+    let host_input = labeled_input(&i18n::t("form.host"), &state.form.host, Message::FormHostChanged);
+    let port_input = labeled_input(&i18n::t("form.port"), &state.form.port, Message::FormPortChanged);
     let user_input = labeled_input(
-        "Username",
+        &i18n::t("form.username"),
         &state.form.username,
         Message::FormUsernameChanged,
     );
 
     let auth_row = row![
         button(
-            text("Password")
+            text(i18n::t("form.password"))
                 .color(if state.form.auth_type == "password" {
                     theme::TEXT_PRIMARY
                 } else {
@@ -3281,7 +3351,7 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
             transparent_button_style
         }),
         button(
-            text("Private Key")
+            text(i18n::t("form.private_key"))
                 .color(if state.form.auth_type == "key" {
                     theme::TEXT_PRIMARY
                 } else {
@@ -3299,15 +3369,15 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
     ]
     .spacing(8);
 
-    let auth_label = text("Auth Type").color(theme::TEXT_SECONDARY).size(12);
+    let auth_label = text(i18n::t("form.auth_type")).color(theme::TEXT_SECONDARY).size(12);
 
     let auth_fields: Element<'_, Message> = if state.form.auth_type == "key" {
-        let key_label = text("Private Key Path").color(theme::TEXT_SECONDARY).size(12);
+        let key_label = text(i18n::t("form.key_path")).color(theme::TEXT_SECONDARY).size(12);
         let key_input = text_input("", &state.form.private_key)
             .on_input(Message::FormPrivateKeyChanged)
             .padding(8)
             .size(14);
-        let browse_btn = button(text("Browse...").color(theme::ACCENT).size(12))
+        let browse_btn = button(text(i18n::t("form.browse")).color(theme::ACCENT).size(12))
             .on_press(Message::BrowseKeyFile)
             .padding(Padding::from([6, 12]))
             .style(transparent_button_style);
@@ -3323,7 +3393,7 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
         column![
             key_field,
             labeled_input(
-                "Passphrase (optional)",
+                &i18n::t("form.passphrase"),
                 &state.form.passphrase,
                 Message::FormPassphraseChanged
             ),
@@ -3331,11 +3401,11 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
         .spacing(12)
         .into()
     } else {
-        labeled_input("Password", &state.form.password, Message::FormPasswordChanged)
+        labeled_input(&i18n::t("form.password"), &state.form.password, Message::FormPasswordChanged)
     };
 
     let group_input: Element<'_, Message> = {
-        let label_text = text("Group (optional)").color(theme::TEXT_SECONDARY).size(12);
+        let label_text = text(i18n::t("form.group")).color(theme::TEXT_SECONDARY).size(12);
         let input = text_input("", &state.form.group)
             .on_input(Message::FormGroupChanged)
             .on_submit(Message::SaveForm)
@@ -3351,11 +3421,11 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
     };
 
     let buttons = row![
-        button(text("Cancel").color(theme::TEXT_SECONDARY).size(14))
+        button(text(i18n::t("form.cancel")).color(theme::TEXT_SECONDARY).size(14))
             .on_press(Message::HideForm)
             .padding(Padding::from([8, 20]))
             .style(transparent_button_style),
-        button(text("Save").color(theme::TEXT_PRIMARY).size(14))
+        button(text(i18n::t("form.save")).color(theme::TEXT_PRIMARY).size(14))
             .on_press(Message::SaveForm)
             .padding(Padding::from([8, 20]))
             .style(accent_button_style),
