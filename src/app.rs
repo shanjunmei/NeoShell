@@ -1653,10 +1653,16 @@ fn subscription(state: &NeoShell) -> Subscription<Message> {
         subs.push(time::every(Duration::from_secs(3)).map(|_| Message::FetchMonitorData));
     }
 
-    // Listen for keyboard events when we are on the main screen with an active
-    // terminal tab. We use event::listen so we can capture raw key events
-    // even when the canvas does not have focus.
-    if state.screen == Screen::Main && state.active_tab.is_some() {
+    // Listen for keyboard/mouse events ONLY when terminal is active and
+    // no modal is open. When forms/dialogs are open, let iced handle
+    // Tab focus switching and Enter submit natively.
+    if state.screen == Screen::Main
+        && state.active_tab.is_some()
+        && !state.show_form
+        && !state.show_connect_dialog
+        && state.editor_file_path.is_none()
+        && state.selected_interface.is_none()
+    {
         subs.push(event::listen().map(|evt| {
             match evt {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
