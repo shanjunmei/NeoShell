@@ -58,8 +58,14 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           APP="dist/NeoShell.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp "target/${{ matrix.target }}/release/neoshell" "$APP/Contents/MacOS/"
-          cp "target/${{ matrix.target }}/release/libneoshell_core.dylib" "$APP/Contents/MacOS/"
+          # Find workspace binaries (path varies by target)
+          BIN=$(find target -name "neoshell" -path "*/release/*" -not -name "*.d" -not -name "*.dylib" | head -1)
+          LIB=$(find target -name "libneoshell_core.dylib" -path "*/release/*" | head -1)
+          echo "Found launcher: $BIN" && echo "Found core: $LIB"
+          [ -z "$BIN" ] && echo "ERROR: launcher not found" && exit 1
+          [ -z "$LIB" ] && echo "ERROR: core lib not found" && exit 1
+          cp "$BIN" "$APP/Contents/MacOS/"
+          cp "$LIB" "$APP/Contents/MacOS/"
           cat > "$APP/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
