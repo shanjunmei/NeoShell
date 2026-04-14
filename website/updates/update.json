@@ -1,0 +1,27 @@
+{
+  "version": "0.3.1",
+  "date": "2026-04-14",
+  "changelog": "Tab focus cycling, rounded icon, website redesign",
+  "downloads": {
+    "macos-aarch64": {
+      "url": "https://neoshell.wwwneo.com/updates/libs/libneoshell_core-0.3.1-macos-aarch64.dylib",
+      "md5": "placeholder",
+      "size": 0
+    },
+    "macos-x86_64": {
+      "url": "https://neoshell.wwwneo.com/updates/libs/libneoshell_core-0.3.1-macos-x86_64.dylib",
+      "md5": "placeholder",
+      "size": 0
+    },
+    "windows-x64": {
+      "url": "https://neoshell.wwwneo.com/updates/libs/neoshell_core-0.3.1-windows-x64.dll",
+      "md5": "placeholder",
+      "size": 0
+    },
+    "linux-x86_64": {
+      "url": "https://neoshell.wwwneo.com/updates/libs/libneoshell_core-0.3.1-linux-x86_64.so",
+      "md5": "placeholder",
+      "size": 0
+    }
+  }
+}

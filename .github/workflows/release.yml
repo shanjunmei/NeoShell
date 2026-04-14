@@ -50,7 +50,7 @@ jobs:
           elif [ -d "/usr/local/opt/openssl@3" ]; then
             export OPENSSL_DIR="/usr/local/opt/openssl@3"
           fi
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --workspace --target ${{ matrix.target }}
 
       - name: Package DMG
         run: |
@@ -59,6 +59,7 @@ jobs:
           APP="dist/NeoShell.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp "target/${{ matrix.target }}/release/neoshell" "$APP/Contents/MacOS/"
+          cp "target/${{ matrix.target }}/release/libneoshell_core.dylib" "$APP/Contents/MacOS/"
           cat > "$APP/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -105,6 +106,10 @@ jobs:
             --entitlements scripts/entitlements.plist \
             --sign "$SIGN_IDENTITY" \
             "$APP/Contents/MacOS/neoshell"
+          codesign --force --options runtime \
+            --entitlements scripts/entitlements.plist \
+            --sign "$SIGN_IDENTITY" \
+            "$APP/Contents/MacOS/libneoshell_core.dylib"
           codesign --force --deep --options runtime \
             --entitlements scripts/entitlements.plist \
             --sign "$SIGN_IDENTITY" \
@@ -144,7 +149,7 @@ jobs:
             libxkbcommon-dev libwayland-dev libvulkan-dev libfuse2
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --workspace
 
       - name: Package AppImage
         run: |
@@ -152,6 +157,7 @@ jobs:
           APP="dist/NeoShell.AppDir"
           mkdir -p "$APP/usr/bin" "$APP/usr/share/applications" "$APP/usr/share/icons/hicolor/256x256/apps"
           cp target/release/neoshell "$APP/usr/bin/"
+          cp target/release/libneoshell_core.so "$APP/usr/bin/"
           cp assets/icon.png "$APP/neoshell.png"
           cp assets/icon.png "$APP/usr/share/icons/hicolor/256x256/apps/neoshell.png"
           cat > "$APP/neoshell.desktop" <<'EOF'
@@ -175,7 +181,7 @@ jobs:
         if: failure()
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          mkdir -p dist && tar -czf "dist/NeoShell-${VERSION}-linux-x86_64.tar.gz" -C target/release neoshell
+          mkdir -p dist && tar -czf "dist/NeoShell-${VERSION}-linux-x86_64.tar.gz" -C target/release neoshell libneoshell_core.so
 
       - name: Upload to Release
         if: always()
@@ -207,13 +213,14 @@ jobs:
       - name: Build release
         env:
           OPENSSL_STATIC: "1"
-        run: cargo build --release
+        run: cargo build --release --workspace
 
       - name: Package zip
         run: |
           $VERSION = "${{ github.ref_name }}".TrimStart("v")
           New-Item -ItemType Directory -Force -Path dist,dist\NeoShell
           Copy-Item target\release\neoshell.exe dist\NeoShell\
+          Copy-Item target\release\neoshell_core.dll dist\NeoShell\
           Copy-Item assets\icon.png dist\NeoShell\
           Compress-Archive -Path dist\NeoShell\* -DestinationPath "dist\NeoShell-$VERSION-windows-x64.zip"
 

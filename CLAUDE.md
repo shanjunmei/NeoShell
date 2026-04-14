@@ -35,18 +35,29 @@ cargo build --release # Release build
 
 ## Architecture
 
+Cargo workspace with thin launcher + dynamic core library:
+
 ```
-src/
-  main.rs             # Entry point, launches iced app
-  app.rs              # iced Application: state, update, view, subscriptions
-  crypto/mod.rs       # AES-256-GCM encryption, Argon2id key derivation
-  storage/mod.rs      # Encrypted connection vault (vault.json)
-  ssh/mod.rs          # SSH session manager (ssh2 + background threads)
-  terminal/mod.rs     # VTE terminal emulator (grid + parser)
-  ui/
-    mod.rs            # UI module re-exports
-    theme.rs          # Color constants
+Cargo.toml              # Workspace root
+launcher/
+  src/main.rs           # Thin binary: dlopen core, restart loop, update swap
+core/
+  build.rs              # Windows resource compilation
+  src/
+    lib.rs              # Exports neoshell_run() + neoshell_version() via C ABI
+    app.rs              # iced Application: state, update, view, subscriptions
+    crypto/mod.rs       # AES-256-GCM encryption, Argon2id key derivation
+    storage/mod.rs      # Encrypted connection vault (vault.json)
+    ssh/mod.rs          # SSH session manager (ssh2 + background threads)
+    terminal/mod.rs     # VTE terminal emulator (grid + parser)
+    sshconfig.rs        # ~/.ssh/config parser
+    ui/
+      mod.rs            # UI module re-exports
+      theme.rs          # Color constants
+    updater.rs          # Background update checker/downloader
 ```
+
+Build produces: `neoshell` (launcher binary) + `libneoshell_core.dylib` (cdylib with all logic).
 
 ### Data Flow
 1. User interacts with iced GUI → generates `Message`
@@ -80,4 +91,5 @@ src/
 
 - Tag-based releases trigger CI/CD builds (not main branch pushes)
 - `dev` branch is local-only, never push to remote
-- Single binary output, no web runtime dependencies
+- Two-artifact output: launcher binary + core dylib, no web runtime dependencies
+- Updater checks https://neoshell.wwwneo.com/updates/update.json for new core library versions

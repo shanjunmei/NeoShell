@@ -1,0 +1,52 @@
+[package]
+name = "neoshell-core"
+version = "0.3.1"
+edition = "2021"
+description = "NeoShell core library — all application logic"
+
+[lib]
+name = "neoshell_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# GUI
+iced = { version = "0.13", features = ["tokio", "canvas", "advanced"] }
+
+# Terminal emulation
+vte = "0.13"
+
+# SSH
+ssh2 = "0.9"
+
+# Crypto
+aes-gcm = "0.10"
+argon2 = "0.5"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+rand = "0.8"
+dirs = "5"
+parking_lot = "0.12"
+log = "0.4"
+env_logger = "0.11"
+once_cell = "1"
+rfd = "0.15"
+arboard = "3"
+
+# Updater
+ureq = { version = "~2", features = ["json"] }
+md-5 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
