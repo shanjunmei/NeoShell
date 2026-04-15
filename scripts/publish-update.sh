@@ -58,69 +58,19 @@ echo ""
 log "Downloaded artifacts:"
 ls -lh downloads/
 
-# ── Extract dynamic libraries from each platform ───────────────
-info "Extracting dynamic libraries..."
+# ── Collect dynamic libraries (CI uploads them as separate release assets) ──
+info "Collecting dynamic libraries from release assets..."
 
-# macOS ARM64 (.dmg → .dylib)
-DMG_ARM="downloads/NeoShell-${VER_NUM}-macos-aarch64.dmg"
-if [ -f "$DMG_ARM" ]; then
-    MOUNT_DIR=$(hdiutil attach "$DMG_ARM" -nobrowse -readonly 2>/dev/null | grep "Volumes" | awk -F'\t' '{print $NF}')
-    if [ -d "$MOUNT_DIR" ]; then
-        cp "$MOUNT_DIR/NeoShell.app/Contents/MacOS/libneoshell_core.dylib" \
-           "libs/libneoshell_core-${VER_NUM}-macos-aarch64.dylib" 2>/dev/null && \
-           log "Extracted: macos-aarch64 dylib" || warn "No dylib in ARM64 DMG"
-        hdiutil detach "$MOUNT_DIR" -quiet 2>/dev/null || true
-    fi
-fi
-
-# macOS x86_64 (.dmg → .dylib)
-DMG_X86="downloads/NeoShell-${VER_NUM}-macos-x86_64.dmg"
-if [ -f "$DMG_X86" ]; then
-    MOUNT_DIR=$(hdiutil attach "$DMG_X86" -nobrowse -readonly 2>/dev/null | grep "Volumes" | awk -F'\t' '{print $NF}')
-    if [ -d "$MOUNT_DIR" ]; then
-        cp "$MOUNT_DIR/NeoShell.app/Contents/MacOS/libneoshell_core.dylib" \
-           "libs/libneoshell_core-${VER_NUM}-macos-x86_64.dylib" 2>/dev/null && \
-           log "Extracted: macos-x86_64 dylib" || warn "No dylib in x86 DMG"
-        hdiutil detach "$MOUNT_DIR" -quiet 2>/dev/null || true
-    fi
-fi
-
-# Windows (.zip → .dll)
-ZIP_WIN="downloads/NeoShell-${VER_NUM}-windows-x64.zip"
-if [ -f "$ZIP_WIN" ]; then
-    mkdir -p /tmp/neo-win-extract
-    unzip -o "$ZIP_WIN" -d /tmp/neo-win-extract/ 2>/dev/null
-    DLL=$(find /tmp/neo-win-extract -name "neoshell_core.dll" 2>/dev/null | head -1)
-    if [ -n "$DLL" ]; then
-        cp "$DLL" "libs/neoshell_core-${VER_NUM}-windows-x64.dll"
-        log "Extracted: windows-x64 dll"
-    else
-        warn "No dll in Windows zip"
-    fi
-    rm -rf /tmp/neo-win-extract
-fi
-
-# Linux (.AppImage → .so)
-APPIMAGE="downloads/NeoShell-${VER_NUM}-linux-x86_64.AppImage"
-if [ -f "$APPIMAGE" ]; then
-    chmod +x "$APPIMAGE"
-    mkdir -p /tmp/neo-linux-extract
-    cd /tmp/neo-linux-extract
-    "$WORK_DIR/$APPIMAGE" --appimage-extract 2>/dev/null || true
-    SO=$(find . -name "libneoshell_core.so" 2>/dev/null | head -1)
-    if [ -n "$SO" ]; then
-        cp "$SO" "$WORK_DIR/libs/libneoshell_core-${VER_NUM}-linux-x86_64.so"
-        log "Extracted: linux-x86_64 so"
-    else
-        warn "No .so in AppImage"
-    fi
-    rm -rf /tmp/neo-linux-extract
-    cd "$WORK_DIR"
-fi
+# Direct copy — CI already uploads versioned dylib/so/dll files
+for f in downloads/libneoshell_core-*.dylib downloads/libneoshell_core-*.so downloads/neoshell_core-*.dll; do
+    [ -f "$f" ] || continue
+    cp "$f" "libs/$(basename $f)"
+    log "Found: $(basename $f)"
+done
 
 echo ""
-log "Extracted libraries:"
-ls -lh libs/ 2>/dev/null || warn "No libraries extracted"
+log "Collected libraries:"
+ls -lh libs/ 2>/dev/null || warn "No libraries found"
 
 # ── Generate MD5 checksums ─────────────────────────────────────
 info "Calculating MD5 checksums..."
