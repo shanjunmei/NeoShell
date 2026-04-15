@@ -91,6 +91,7 @@ static EN: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("form.group", "Group (optional)");
     m.insert("form.cancel", "Cancel");
     m.insert("form.save", "Save");
+    m.insert("form.keep_existing", "(unchanged — leave empty to keep)");
     // File browser
     m.insert("filebrowser.upload", "^ Upload");
     m.insert("filebrowser.loading", "Loading files...");
@@ -139,6 +140,52 @@ static EN: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("history.filter", "Filter commands...");
     m.insert("history.empty", "No commands yet");
     m.insert("history.clear", "Clear");
+    // Proxy
+    m.insert("proxy.title", "Proxy Manager");
+    m.insert("proxy.add", "+ Add Proxy");
+    m.insert("proxy.name", "Name");
+    m.insert("proxy.type", "Type");
+    m.insert("proxy.host", "Host");
+    m.insert("proxy.port", "Port");
+    m.insert("proxy.username", "Username");
+    m.insert("proxy.password", "Password");
+    m.insert("proxy.save", "Save");
+    m.insert("proxy.cancel", "Cancel");
+    m.insert("proxy.test", "Test");
+    m.insert("proxy.delete", "Del");
+    m.insert("proxy.edit", "Edit");
+    m.insert("proxy.empty", "No proxies configured");
+    m.insert("proxy.ok", "OK");
+    m.insert("proxy.fail", "Fail");
+    m.insert("proxy.testing", "...");
+    m.insert("proxy.none", "Direct (no proxy)");
+    m.insert("proxy.select", "Proxy");
+    // UI elements
+    m.insert("btn.close", "x");
+    m.insert("btn.refresh", "R");
+    m.insert("btn.send", "Send");
+    m.insert("btn.edit", "E");
+    m.insert("btn.download", "v");
+    m.insert("bottom.files", "Files");
+    m.insert("bottom.cmd", "Cmd");
+    m.insert("process.title", "Process Info");
+    m.insert("process.child", "Child Processes");
+    m.insert("process.listen", "Listening Ports");
+    m.insert("process.net", "Network Connections");
+    m.insert("process.fds", "Open Files");
+    m.insert("process.threads", "Threads");
+    m.insert("net.speed", "Speed");
+    m.insert("net.interface", "Interface");
+    m.insert("net.received", "Received");
+    m.insert("net.sent", "Sent");
+    m.insert("file.name", "Name");
+    m.insert("file.size", "Size");
+    m.insert("file.modified", "Modified");
+    m.insert("file.send_prefix", "Send:");
+    m.insert("settings.font_size", "Font Size");
+    m.insert("status.shortcuts", "Cmd+H:History  Cmd+T:Connect");
+    m.insert("welcome.select", "Select a connection from the sidebar to begin");
+    m.insert("confirm.delete", "Delete \"{name}\"?");
     m
 });
 
@@ -219,6 +266,7 @@ static ZH: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("form.group", "分组 (可选)");
     m.insert("form.cancel", "取消");
     m.insert("form.save", "保存");
+    m.insert("form.keep_existing", "(未修改 — 留空保留原值)");
     m.insert("filebrowser.upload", "^ 上传");
     m.insert("filebrowser.loading", "正在加载文件...");
     m.insert("filedialog.upload", "选择要上传的文件");
@@ -258,6 +306,52 @@ static ZH: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("history.filter", "搜索命令...");
     m.insert("history.empty", "暂无命令记录");
     m.insert("history.clear", "清空");
+    // 代理
+    m.insert("proxy.title", "代理管理");
+    m.insert("proxy.add", "+ 添加代理");
+    m.insert("proxy.name", "名称");
+    m.insert("proxy.type", "类型");
+    m.insert("proxy.host", "主机");
+    m.insert("proxy.port", "端口");
+    m.insert("proxy.username", "用户名");
+    m.insert("proxy.password", "密码");
+    m.insert("proxy.save", "保存");
+    m.insert("proxy.cancel", "取消");
+    m.insert("proxy.test", "测试");
+    m.insert("proxy.delete", "删除");
+    m.insert("proxy.edit", "编辑");
+    m.insert("proxy.empty", "暂无代理配置");
+    m.insert("proxy.ok", "可用");
+    m.insert("proxy.fail", "不可用");
+    m.insert("proxy.testing", "...");
+    m.insert("proxy.none", "直连 (无代理)");
+    m.insert("proxy.select", "代理");
+    // 界面元素
+    m.insert("btn.close", "关闭");
+    m.insert("btn.refresh", "刷新");
+    m.insert("btn.send", "发送");
+    m.insert("btn.edit", "编辑");
+    m.insert("btn.download", "下载");
+    m.insert("bottom.files", "文件");
+    m.insert("bottom.cmd", "命令");
+    m.insert("process.title", "进程信息");
+    m.insert("process.child", "子进程");
+    m.insert("process.listen", "监听端口");
+    m.insert("process.net", "网络连接");
+    m.insert("process.fds", "打开文件");
+    m.insert("process.threads", "线程");
+    m.insert("net.speed", "速率");
+    m.insert("net.interface", "接口");
+    m.insert("net.received", "接收");
+    m.insert("net.sent", "发送");
+    m.insert("file.name", "名称");
+    m.insert("file.size", "大小");
+    m.insert("file.modified", "修改时间");
+    m.insert("file.send_prefix", "发送:");
+    m.insert("settings.font_size", "字体大小");
+    m.insert("status.shortcuts", "Cmd+H:历史  Cmd+T:连接");
+    m.insert("welcome.select", "从左侧选择一个连接以开始");
+    m.insert("confirm.delete", "确认删除 \"{name}\"?");
     m
 });
 

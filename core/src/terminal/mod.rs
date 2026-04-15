@@ -285,6 +285,7 @@ impl TerminalGrid {
         if self.cursor_y >= new_rows {
             self.cursor_y = new_rows - 1;
         }
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Scroll the visible region up by one line.

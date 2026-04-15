@@ -92,6 +92,27 @@ pub struct ConnectParams {
     pub password: Option<String>,
     pub private_key: Option<String>,
     pub passphrase: Option<String>,
+    pub proxy_id: Option<String>,
+}
+
+/// Establish TCP connection, optionally through a proxy.
+fn establish_tcp(params: &ConnectParams) -> Result<TcpStream, String> {
+    use crate::proxy::{self, ProxyStore};
+
+    if let Some(ref proxy_id) = params.proxy_id {
+        let store = ProxyStore::new();
+        if let Some(proxy_cfg) = store.get(proxy_id) {
+            return proxy::connect_via_proxy(
+                &proxy_cfg,
+                &params.host,
+                params.port,
+                Duration::from_secs(15),
+            );
+        }
+        // proxy_id set but proxy not found — fall through to direct
+        log::warn!("Proxy '{}' not found, connecting directly", proxy_id);
+    }
+    proxy::connect_direct(&params.host, params.port, Duration::from_secs(10))
 }
 
 /// How the interactive shell is wrapped for session persistence.
@@ -254,6 +275,7 @@ impl SshManager {
             config.password.as_deref(),
             config.private_key.as_deref(),
             config.passphrase.as_deref(),
+            config.proxy_id.as_deref(),
         )
     }
 
@@ -277,19 +299,23 @@ impl SshManager {
         password: Option<&str>,
         private_key: Option<&str>,
         passphrase: Option<&str>,
+        proxy_id: Option<&str>,
     ) -> Result<String, String> {
         let session_id = uuid::Uuid::new_v4().to_string();
 
+        let tmp_params = ConnectParams {
+            host: host.to_string(),
+            port,
+            username: username.to_string(),
+            auth_type: auth_type.to_string(),
+            password: password.map(|s| s.to_string()),
+            private_key: private_key.map(|s| s.to_string()),
+            passphrase: passphrase.map(|s| s.to_string()),
+            proxy_id: proxy_id.map(|s| s.to_string()),
+        };
+
         // --- Establish TCP + SSH handshake (blocking) ----------------------
-        let addr = format!("{}:{}", host, port);
-        let tcp = TcpStream::connect_timeout(
-            &addr.to_socket_addrs()
-                .map_err(|e| format!("DNS resolve failed for '{}': {}", addr, e))?
-                .next()
-                .ok_or_else(|| format!("No address found for '{}'", addr))?,
-            Duration::from_secs(10),
-        )
-        .map_err(|e| format!("TCP connect to {} failed: {}", addr, e))?;
+        let tcp = establish_tcp(&tmp_params)?;
 
         tcp.set_nonblocking(false)
             .map_err(|e| format!("Failed to set blocking mode: {}", e))?;
@@ -355,27 +381,11 @@ impl SshManager {
         session.set_keepalive(true, 15);
 
         // --- Build ConnectParams for reconnection -------------------------
-        let params = ConnectParams {
-            host: host.to_string(),
-            port,
-            username: username.to_string(),
-            auth_type: auth_type.to_string(),
-            password: password.map(|s| s.to_string()),
-            private_key: private_key.map(|s| s.to_string()),
-            passphrase: passphrase.map(|s| s.to_string()),
-        };
+        let params = tmp_params;
 
         // --- Open a SECOND independent SSH connection for exec commands ----
-        // libssh2 is not thread-safe: concurrent channel operations on the
-        // same Session will deadlock.  A dedicated exec session avoids this.
         let exec_session = {
-            let tcp2 = TcpStream::connect_timeout(
-                &addr.to_socket_addrs()
-                    .map_err(|e| format!("DNS resolve failed: {}", e))?
-                    .next().ok_or("No address found")?,
-                Duration::from_secs(10),
-            )
-            .map_err(|e| format!("Exec TCP connect failed: {}", e))?;
+            let tcp2 = establish_tcp(&params)?;
 
             let mut sess2 = Session::new()
                 .map_err(|e| format!("Failed to create exec session: {}", e))?;
@@ -421,7 +431,7 @@ impl SshManager {
             .map_err(|e| format!("Failed to open channel: {}", e))?;
 
         channel
-            .request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
+            .request_pty("xterm-256color", None, Some((120, 40, 0, 0)))
             .map_err(|e| format!("PTY request failed: {}", e))?;
 
         // Set UTF-8 locale (ignore errors — server may reject setenv)
@@ -1258,14 +1268,7 @@ impl SshManager {
 /// (with PTY + tmux or shell), and a fresh exec session for monitoring.
 /// Create a standalone SSH session for exec/SFTP operations.
 fn create_exec_connection(params: &ConnectParams) -> Result<Session, String> {
-    let addr = format!("{}:{}", params.host, params.port);
-    let tcp = TcpStream::connect_timeout(
-        &addr.to_socket_addrs()
-            .map_err(|e| format!("DNS resolve failed: {}", e))?
-            .next().ok_or("No address found")?,
-        Duration::from_secs(10),
-    )
-    .map_err(|e| format!("Exec TCP connect failed: {}", e))?;
+    let tcp = establish_tcp(params)?;
 
     tcp.set_nonblocking(false).ok();
 
@@ -1334,15 +1337,7 @@ fn reconnect_ssh(
     params: &ConnectParams,
     mode: &SessionMode,
 ) -> Result<(Session, ssh2::Channel, Session), String> {
-    let addr = format!("{}:{}", params.host, params.port);
-    let tcp = TcpStream::connect_timeout(
-        &addr.to_socket_addrs()
-            .map_err(|e| format!("DNS resolve failed: {}", e))?
-            .next()
-            .ok_or("No address found")?,
-        Duration::from_secs(10),
-    )
-    .map_err(|e| format!("TCP reconnect failed: {}", e))?;
+    let tcp = establish_tcp(params)?;
 
     tcp.set_nonblocking(false).ok();
 
@@ -1388,7 +1383,7 @@ fn reconnect_ssh(
         .channel_session()
         .map_err(|e| format!("Channel failed: {}", e))?;
     channel
-        .request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
+        .request_pty("xterm-256color", None, Some((120, 40, 0, 0)))
         .map_err(|e| format!("PTY failed: {}", e))?;
 
     let _ = channel.setenv("LANG", "en_US.UTF-8");

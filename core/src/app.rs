@@ -243,11 +243,37 @@ pub struct NeoShell {
     show_settings: bool,
     show_about: bool,
     ui_scale: f32,
+    bottom_panel_tab: BottomTab,
+    bottom_panel_height: f32,
+    dragging_splitter: bool,
+    drag_start_y: f32,
+    drag_start_height: f32,
+    cursor_y: f32,
+    window_height: f32,
+    path_input: String,
+    quick_cmd_input: String,
+    last_term_size: (usize, usize),
+    font_size: f32,                  // terminal font size (default 13)
+    local_path: String,              // local file browser path
+    local_entries: Vec<LocalFileEntry>,
+    selected_local_file: Option<String>, // selected local file full path
+    context_menu: Option<ContextMenu>,
+    process_detail: Option<ProcessDetailInfo>,
+    confirm_delete: Option<(String, String)>,  // (conn_id, conn_name) pending delete  // clicked process detail popup
 
     // Command history (per session + global)
     cmd_history: Vec<CmdRecord>,
     show_history: bool,
     history_filter: String,
+
+    // Proxy management
+    proxy_store: crate::proxy::ProxyStore,
+    proxies: Vec<crate::proxy::ProxyConfig>,
+    show_proxy_manager: bool,
+    show_proxy_form: bool,
+    proxy_form: ProxyFormData,
+    proxy_edit_id: Option<String>,
+    proxy_test_results: HashMap<String, crate::proxy::ProxyTestResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -284,6 +310,51 @@ struct ConnectionFormData {
     private_key: String,
     passphrase: String,
     group: String,
+    proxy_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessDetailInfo {
+    pid: u32,
+    fields: Vec<(String, String)>,
+    children: Vec<String>,      // child process lines
+    threads: Vec<String>,       // thread IDs
+    net_conns: Vec<String>,     // network connections (ss output)
+    listen_ports: Vec<String>,  // listening ports
+    open_fds: Vec<String>,      // file descriptors
+}
+
+#[derive(Debug, Clone)]
+struct LocalFileEntry {
+    name: String,
+    is_dir: bool,
+    size: u64,
+    path: String,
+}
+
+#[derive(Debug, Clone)]
+struct ContextMenu {
+    conn_id: String,
+    conn_name: String,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum BottomTab {
+    Monitor,
+    Files,
+    QuickCmd,
+}
+
+#[derive(Default, Clone)]
+struct ProxyFormData {
+    name: String,
+    proxy_type: String, // "socks5h" or "http"
+    host: String,
+    port: String,
+    username: String,
+    password: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +458,7 @@ pub enum Message {
     // Terminal scrollback & selection
     TerminalScrollUp(usize),
     TerminalScrollDown(usize),
-    TerminalMouseDown,
+    TerminalMouseDown(f32, f32),  // (x, y) cursor position
     TerminalMouseUp,
     TerminalMouseMove(f32, f32),
     CopySelection,
@@ -407,12 +478,57 @@ pub enum Message {
     HideAbout,
     SetUiScale(f32),
 
+    // Bottom panel
+    SwitchBottomTab(BottomTab),
+    PathInputChanged(String),
+    PathInputSubmit,
+    ShowContextMenu(String, String, f32, f32),
+    HideContextMenu,
+    InspectProcess(u32),
+    ProcessDetailReceived(ProcessDetailInfo),
+    HideProcessDetail,
+    ConfirmDelete(String, String),  // (conn_id, conn_name)
+    CancelDelete,
+    ExecuteDelete,
+
     // Command history
     ShowHistory,
     HideHistory,
     HistoryFilterChanged(String),
-    ReplayCommand(String),   // re-send a command to active session
+    ReplayCommand(String),
     ClearHistory,
+    QuickCmdInputChanged(String),
+    SendQuickCmd,
+    SetFontSize(f32),
+    ResizeBottomPanel(f32),
+    SplitterDragStart(f32),       // mouse y position
+    SplitterDragMove(f32),        // mouse y position
+    SplitterDragEnd,
+    // Local file browser
+    LocalPathChanged(String),
+    LocalPathSubmit,
+    LocalFileClicked(String),     // full path — if dir, navigate; if file, select
+    SelectLocalFile(String),
+    UploadLocalFile,
+    RefreshLocalFiles,
+    RefreshRemoteFiles,
+
+    // Proxy management
+    ShowProxyManager,
+    HideProxyManager,
+    ShowProxyForm(Option<String>), // None=new, Some(id)=edit
+    HideProxyForm,
+    ProxyFormNameChanged(String),
+    ProxyFormTypeChanged(String),
+    ProxyFormHostChanged(String),
+    ProxyFormPortChanged(String),
+    ProxyFormUsernameChanged(String),
+    ProxyFormPasswordChanged(String),
+    SaveProxy,
+    DeleteProxy(String),
+    TestProxy(String),
+    ProxyTestDone(String, crate::proxy::ProxyTestResult),
+    FormProxyChanged(String), // connection form: select proxy
 
     // Misc
     Tick,
@@ -469,6 +585,49 @@ fn save_ui_scale(scale: f32) {
         let _ = std::fs::create_dir_all(&neo_dir);
         let _ = std::fs::write(neo_dir.join("scale"), format!("{:.2}", scale));
     }
+}
+
+/// Load persisted font size.
+fn load_font_size() -> f32 {
+    if let Some(d) = dirs::config_dir() {
+        if let Ok(s) = std::fs::read_to_string(d.join("neoshell").join("fontsize")) {
+            if let Ok(v) = s.trim().parse::<f32>() {
+                if (8.0..=30.0).contains(&v) { return v; }
+            }
+        }
+    }
+    13.0
+}
+
+fn save_font_size(size: f32) {
+    if let Some(d) = dirs::config_dir() {
+        let dir = d.join("neoshell");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("fontsize"), format!("{:.1}", size));
+    }
+}
+
+/// List local directory entries.
+fn list_local_dir(path: &str) -> Vec<LocalFileEntry> {
+    let mut entries = Vec::new();
+    let dir = std::path::Path::new(path);
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let meta = entry.metadata().ok();
+            let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            entries.push(LocalFileEntry {
+                name: entry.file_name().to_string_lossy().to_string(),
+                is_dir,
+                size,
+                path: entry.path().to_string_lossy().to_string(),
+            });
+        }
+    }
+    entries.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    entries
 }
 
 /// Persist locale choice to config dir.
@@ -539,9 +698,36 @@ impl Default for NeoShell {
             show_settings: false,
             show_about: false,
             ui_scale: load_ui_scale(),
+            bottom_panel_tab: BottomTab::Monitor,
+            bottom_panel_height: 220.0,
+            dragging_splitter: false,
+            drag_start_y: 0.0,
+            drag_start_height: 220.0,
+            cursor_y: 0.0,
+            window_height: 800.0,
+            path_input: String::new(),
+            quick_cmd_input: String::new(),
+            last_term_size: (0, 0),
+            font_size: load_font_size(),
+            local_path: dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "/".into()),
+            local_entries: Vec::new(),
+            selected_local_file: None,
+            context_menu: None,
+            process_detail: None,
+            confirm_delete: None,
             cmd_history: Vec::new(),
             show_history: false,
             history_filter: String::new(),
+            proxy_store: crate::proxy::ProxyStore::new(),
+            proxies: {
+                let ps = crate::proxy::ProxyStore::new();
+                ps.load()
+            },
+            show_proxy_manager: false,
+            show_proxy_form: false,
+            proxy_form: ProxyFormData::default(),
+            proxy_edit_id: None,
+            proxy_test_results: HashMap::new(),
         }
     }
 }
@@ -666,7 +852,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
 
             // Create a placeholder tab immediately so user sees feedback
             let tab_id = uuid::Uuid::new_v4().to_string();
-            let terminal = Arc::new(parking_lot::Mutex::new(TerminalGrid::new(80, 24)));
+            let terminal = Arc::new(parking_lot::Mutex::new(TerminalGrid::new(120, 40)));
             {
                 let mut grid = terminal.lock();
                 grid.write(b"\x1b[33mConnecting...\x1b[0m\r\n");
@@ -750,17 +936,37 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::DeleteConnection(id) => {
-            let store = state.store.clone();
-            Task::perform(
-                async move {
-                    store.delete_connection(&id)?;
-                    store.get_connections()
-                },
-                |result| match result {
-                    Ok(conns) => Message::ConnectionsLoaded(conns),
-                    Err(e) => Message::Error(e),
-                },
-            )
+            // Find name for confirm dialog
+            let name = state.connections.iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| id.clone());
+            state.confirm_delete = Some((id, name));
+            Task::none()
+        }
+        Message::ConfirmDelete(id, name) => {
+            state.confirm_delete = Some((id, name));
+            Task::none()
+        }
+        Message::CancelDelete => {
+            state.confirm_delete = None;
+            Task::none()
+        }
+        Message::ExecuteDelete => {
+            if let Some((id, _)) = state.confirm_delete.take() {
+                let store = state.store.clone();
+                return Task::perform(
+                    async move {
+                        store.delete_connection(&id)?;
+                        store.get_connections()
+                    },
+                    |result| match result {
+                        Ok(conns) => Message::ConnectionsLoaded(conns),
+                        Err(e) => Message::Error(e),
+                    },
+                );
+            }
+            Task::none()
         }
 
         // ---- form ------------------------------------------------------------
@@ -777,6 +983,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                         username: info.username.clone(),
                         auth_type: info.auth_type.clone(),
                         group: info.group.clone(),
+                        proxy_id: info.proxy_id.clone().unwrap_or_default(),
                         ..Default::default()
                     };
                 }
@@ -834,34 +1041,68 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         }
         Message::SaveForm => {
             let port: u16 = state.form.port.parse().unwrap_or(22);
+            let is_edit = state.edit_id.is_some();
+            let edit_id = state.edit_id.clone();
+
+            // When editing, preserve existing secrets if form fields are empty
+            // (ConnectionInfo doesn't expose secrets, so form shows them as empty)
+            let (preserved_pw, preserved_key, preserved_pass) = if let Some(ref id) = edit_id {
+                match state.store.get_connection(id) {
+                    Ok(existing) => (
+                        existing.password.clone(),
+                        existing.private_key.clone(),
+                        existing.passphrase.clone(),
+                    ),
+                    Err(_) => (None, None, None),
+                }
+            } else {
+                (None, None, None)
+            };
+
+            let password = if !state.form.password.is_empty() {
+                Some(state.form.password.clone())
+            } else if is_edit {
+                preserved_pw // keep existing password
+            } else {
+                None
+            };
+
+            let private_key = if !state.form.private_key.is_empty() {
+                Some(state.form.private_key.clone())
+            } else if is_edit {
+                preserved_key
+            } else {
+                None
+            };
+
+            let passphrase = if !state.form.passphrase.is_empty() {
+                Some(state.form.passphrase.clone())
+            } else if is_edit {
+                preserved_pass
+            } else {
+                None
+            };
+
             let config = ConnectionConfig {
-                id: state.edit_id.clone().unwrap_or_default(),
+                id: edit_id.clone().unwrap_or_default(),
                 name: state.form.name.clone(),
                 host: state.form.host.clone(),
                 port,
                 username: state.form.username.clone(),
                 auth_type: state.form.auth_type.clone(),
-                password: if state.form.password.is_empty() {
-                    None
-                } else {
-                    Some(state.form.password.clone())
-                },
-                private_key: if state.form.private_key.is_empty() {
-                    None
-                } else {
-                    Some(state.form.private_key.clone())
-                },
-                passphrase: if state.form.passphrase.is_empty() {
-                    None
-                } else {
-                    Some(state.form.passphrase.clone())
-                },
+                password,
+                private_key,
+                passphrase,
                 group: state.form.group.clone(),
                 color: String::new(),
+                proxy_id: if state.form.proxy_id.is_empty() {
+                    None
+                } else {
+                    Some(state.form.proxy_id.clone())
+                },
             };
 
             let store = state.store.clone();
-            let is_edit = state.edit_id.is_some();
 
             state.show_form = false;
             state.edit_id = None;
@@ -1128,6 +1369,33 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                 return Task::done(Message::SzDetected(sid));
             }
 
+            // Check if terminal grid was resized and notify remote PTY
+            if let Some(idx) = state.active_tab {
+                if let Some(tab) = state.tabs.get(idx) {
+                    if !tab.session_id.is_empty() {
+                        let grid = tab.terminal.lock();
+                        let cur = (grid.cols, grid.rows);
+                        if cur != state.last_term_size && cur.0 > 0 && cur.1 > 0 {
+                            state.last_term_size = cur;
+                            let session_id = tab.session_id.clone();
+                            let ssh = state.ssh_manager.clone();
+                            let cols = cur.0 as u32;
+                            let rows = cur.1 as u32;
+                            drop(grid);
+                            return Task::perform(
+                                async move {
+                                    tokio::task::spawn_blocking(move || {
+                                        ssh.resize(&session_id, cols, rows)
+                                    }).await.ok();
+                                    ()
+                                },
+                                |_| Message::None,
+                            );
+                        }
+                    }
+                }
+            }
+
             Task::none()
         }
 
@@ -1194,6 +1462,10 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
 
             // ESC closes open dialogs
             if let keyboard::Key::Named(keyboard::key::Named::Escape) = &key {
+                if state.process_detail.is_some() {
+                    state.process_detail = None;
+                    return Task::none();
+                }
                 if state.show_history {
                     state.show_history = false;
                     return Task::none();
@@ -1345,6 +1617,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
 
         // ---- file browser ----------------------------------------------------
         Message::FilesReceived(sid, path, entries) => {
+            state.path_input = path.clone();
             state.current_dir.insert(sid.clone(), path);
             state.file_entries.insert(sid, entries);
             Task::none()
@@ -1725,7 +1998,26 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::TerminalMouseDown => {
+        Message::TerminalMouseDown(_x, _y) => {
+            state.context_menu = None;
+
+            // Check if click is on the splitter zone
+            // Layout from top: toolbar(30) + tabbar(34) + terminal(Fill) + splitter(4) + bottom(H) + status(24)
+            // Splitter center Y ≈ window_height - bottom_panel_height - 24 - 2
+            let splitter_y = state.window_height - state.bottom_panel_height - 24.0 - 2.0;
+            let hit = (state.cursor_y - splitter_y).abs() < 8.0;
+
+            if hit && !state.dragging_splitter {
+                state.dragging_splitter = true;
+                state.drag_start_y = state.cursor_y;
+                state.drag_start_height = state.bottom_panel_height;
+                return Task::none();
+            }
+
+            // Normal terminal click — don't start selection if dragging
+            if state.dragging_splitter {
+                return Task::none();
+            }
             state.selecting = true;
             state.selection_start = None;
             state.selection_end = None;
@@ -1739,8 +2031,17 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::TerminalMouseMove(x, y) => {
+            state.cursor_y = y;
+            // Handle splitter drag
+            if state.dragging_splitter {
+                let delta = state.drag_start_y - y;
+                state.bottom_panel_height = (state.drag_start_height + delta).clamp(80.0, 600.0);
+                return Task::none();
+            }
             if state.selecting {
-                if let Some(pos) = pixel_to_grid(x, y) {
+                let sidebar_w = if state.sidebar_collapsed { 0.0 } else { 220.0 };
+                let top_off = 30.0 + 34.0; // toolbar + tabbar
+                if let Some(pos) = pixel_to_grid_with(x, y, sidebar_w, top_off, state.font_size) {
                     if state.selection_start.is_none() {
                         state.selection_start = Some(pos);
                     }
@@ -1757,6 +2058,8 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::TerminalMouseUp => {
+            // Always reset splitter drag
+            state.dragging_splitter = false;
             state.selecting = false;
             if state.selection_start.is_some() && state.selection_end.is_some() {
                 return Task::done(Message::CopySelection);
@@ -1804,6 +2107,86 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         }
         Message::DismissUpdate => {
             state.updater.state.lock().available = false;
+            Task::none()
+        }
+
+        // ---- bottom panel ----------------------------------------------------
+        Message::SwitchBottomTab(tab) => {
+            state.bottom_panel_tab = tab;
+            Task::none()
+        }
+        Message::PathInputChanged(v) => {
+            state.path_input = v;
+            Task::none()
+        }
+        Message::InspectProcess(pid) => {
+            // Get session for exec
+            if let Some(idx) = state.active_tab {
+                if let Some(tab) = state.tabs.get(idx) {
+                    let session_id = tab.session_id.clone();
+                    let ssh = state.ssh_manager.clone();
+                    return Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                // Comprehensive /proc-based process inspection
+                                let cmd = format!(
+                                    concat!(
+                                        "echo '___STATUS___' && cat /proc/{pid}/status 2>/dev/null; ",
+                                        "echo '___CMDLINE___' && tr '\\0' ' ' < /proc/{pid}/cmdline 2>/dev/null; echo; ",
+                                        "echo '___IO___' && cat /proc/{pid}/io 2>/dev/null; ",
+                                        "echo '___CWD___' && readlink /proc/{pid}/cwd 2>/dev/null; ",
+                                        "echo '___EXE___' && readlink /proc/{pid}/exe 2>/dev/null; ",
+                                        "echo '___FD_COUNT___' && ls /proc/{pid}/fd 2>/dev/null | wc -l; ",
+                                        "echo '___PS___' && ps -p {pid} -o pid,ppid,user,nice,vsz,rss,etime,stat,args --no-headers 2>/dev/null; ",
+                                        "echo '___CHILDREN___' && ps --ppid {pid} -o pid,pcpu,pmem,comm --no-headers 2>/dev/null; ",
+                                        "echo '___THREADS___' && ls /proc/{pid}/task 2>/dev/null | head -50; ",
+                                        "echo '___NET___' && ss -tnp 2>/dev/null | grep 'pid={pid},' | head -20; ",
+                                        "echo '___LISTEN___' && ss -tlnp 2>/dev/null | grep 'pid={pid},' | head -10; ",
+                                        "echo '___LIMITS___' && cat /proc/{pid}/limits 2>/dev/null | grep -E 'open files|processes|memory' ; ",
+                                        "echo '___OOM___' && cat /proc/{pid}/oom_score 2>/dev/null; ",
+                                        "echo '___FDS___' && ls -la /proc/{pid}/fd 2>/dev/null | tail -15; ",
+                                    ),
+                                    pid = pid
+                                );
+                                let output = ssh.exec_command(&session_id, &cmd)?;
+                                Ok(parse_process_detail(pid, &output))
+                            }).await.map_err(|e| format!("{}", e))?
+                        },
+                        |result: Result<ProcessDetailInfo, String>| match result {
+                            Ok(detail) => Message::ProcessDetailReceived(detail),
+                            Err(e) => Message::Error(e),
+                        },
+                    );
+                }
+            }
+            Task::none()
+        }
+        Message::ProcessDetailReceived(detail) => {
+            state.process_detail = Some(detail);
+            Task::none()
+        }
+        Message::HideProcessDetail => {
+            state.process_detail = None;
+            Task::none()
+        }
+        Message::ShowContextMenu(id, name, x, y) => {
+            state.context_menu = Some(ContextMenu { conn_id: id, conn_name: name, x, y });
+            Task::none()
+        }
+        Message::HideContextMenu => {
+            state.context_menu = None;
+            Task::none()
+        }
+        Message::PathInputSubmit => {
+            if let Some(idx) = state.active_tab {
+                if let Some(tab) = state.tabs.get(idx) {
+                    let sid = tab.session_id.clone();
+                    let path = state.path_input.clone();
+                    if !path.is_empty() {
+                        return Task::done(Message::ChangeDir(sid, path));
+                    }
+                }
+            }
             Task::none()
         }
 
@@ -1876,6 +2259,226 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             state.cmd_history.clear();
             Task::none()
         }
+        Message::QuickCmdInputChanged(v) => {
+            state.quick_cmd_input = v;
+            Task::none()
+        }
+        Message::SplitterDragStart(y) => {
+            state.dragging_splitter = true;
+            state.drag_start_y = y;
+            state.drag_start_height = state.bottom_panel_height;
+            Task::none()
+        }
+        Message::SplitterDragMove(y) => {
+            if state.dragging_splitter {
+                let delta = state.drag_start_y - y;
+                state.bottom_panel_height = (state.drag_start_height + delta).clamp(80.0, 600.0);
+            }
+            Task::none()
+        }
+        Message::SplitterDragEnd => {
+            state.dragging_splitter = false;
+            Task::none()
+        }
+        Message::SetFontSize(size) => {
+            state.font_size = size.clamp(8.0, 30.0);
+            save_font_size(state.font_size);
+            // Force terminal re-layout
+            state.last_term_size = (0, 0);
+            Task::none()
+        }
+        Message::ResizeBottomPanel(delta) => {
+            if delta < -1000.0 {
+                // Magic: window height update
+                state.window_height = -(delta + 10000.0);
+            } else {
+                state.bottom_panel_height = (state.bottom_panel_height + delta).clamp(80.0, 600.0);
+            }
+            Task::none()
+        }
+        Message::LocalPathChanged(v) => { state.local_path = v; Task::none() }
+        Message::LocalPathSubmit => {
+            state.local_entries = list_local_dir(&state.local_path);
+            Task::none()
+        }
+        Message::LocalFileClicked(path) => {
+            let p = std::path::Path::new(&path);
+            if p.is_dir() {
+                state.local_path = path;
+                state.local_entries = list_local_dir(&state.local_path);
+                state.selected_local_file = None;
+            } else {
+                state.selected_local_file = Some(path);
+            }
+            Task::none()
+        }
+        Message::SelectLocalFile(path) => {
+            state.selected_local_file = Some(path);
+            Task::none()
+        }
+        Message::RefreshLocalFiles => {
+            state.local_entries = list_local_dir(&state.local_path);
+            Task::none()
+        }
+        Message::RefreshRemoteFiles => {
+            if let Some(idx) = state.active_tab {
+                if let Some(tab) = state.tabs.get(idx) {
+                    let sid = tab.session_id.clone();
+                    let path = state.current_dir.get(&sid).cloned().unwrap_or_else(|| "~".into());
+                    return Task::done(Message::ChangeDir(sid, path));
+                }
+            }
+            Task::none()
+        }
+        Message::UploadLocalFile => {
+            // Upload selected local file to remote current dir
+            if let Some(ref local_file) = state.selected_local_file.clone() {
+                if let Some(idx) = state.active_tab {
+                    if let Some(tab) = state.tabs.get(idx) {
+                        let sid = tab.session_id.clone();
+                        let remote_dir = state.current_dir.get(&sid).cloned().unwrap_or_else(|| "~".into());
+                        let file_name = std::path::Path::new(local_file).file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let remote_path = format!("{}/{}", remote_dir.trim_end_matches('/'), file_name);
+                        let ssh = state.ssh_manager.clone();
+                        let local = local_file.clone();
+                        let progress = Arc::new(TransferProgress::new());
+                        *progress.filename.lock() = file_name;
+                        state.transfer_progress = Some(progress.clone());
+                        state.selected_local_file = None;
+                        return Task::perform(
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    ssh.upload_file_with_progress(&sid, &local, &remote_path, progress)
+                                }).await.map_err(|e| format!("{}", e))?
+                            },
+                            |result| match result {
+                                Ok(()) => Message::UploadComplete(String::new()),
+                                Err(e) => Message::Error(e),
+                            },
+                        );
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::SendQuickCmd => {
+            let cmd = state.quick_cmd_input.trim().to_string();
+            if !cmd.is_empty() {
+                state.quick_cmd_input.clear();
+                return Task::done(Message::ReplayCommand(cmd));
+            }
+            Task::none()
+        }
+
+        // ---- proxy management ------------------------------------------------
+        Message::ShowProxyManager => {
+            state.proxies = state.proxy_store.load();
+            state.show_proxy_manager = true;
+            state.proxy_edit_id = None;
+            Task::none()
+        }
+        Message::HideProxyManager => {
+            state.show_proxy_manager = false;
+            Task::none()
+        }
+        Message::ShowProxyForm(maybe_id) => {
+            state.show_proxy_form = true;
+            if let Some(id) = maybe_id {
+                if let Some(p) = state.proxies.iter().find(|p| p.id == id) {
+                    state.proxy_edit_id = Some(id);
+                    state.proxy_form = ProxyFormData {
+                        name: p.name.clone(),
+                        proxy_type: match p.proxy_type {
+                            crate::proxy::ProxyType::Socks5h => "socks5h".into(),
+                            crate::proxy::ProxyType::Http => "http".into(),
+                        },
+                        host: p.host.clone(),
+                        port: p.port.to_string(),
+                        username: p.username.clone().unwrap_or_default(),
+                        password: p.password.clone().unwrap_or_default(),
+                    };
+                }
+            } else {
+                state.proxy_edit_id = None;
+                state.proxy_form = ProxyFormData {
+                    proxy_type: "socks5h".into(),
+                    port: "1080".into(),
+                    ..Default::default()
+                };
+            }
+            Task::none()
+        }
+        Message::HideProxyForm => {
+            state.show_proxy_form = false;
+            state.proxy_edit_id = None;
+            state.proxy_form = ProxyFormData::default();
+            Task::none()
+        }
+        Message::ProxyFormNameChanged(v) => { state.proxy_form.name = v; Task::none() }
+        Message::ProxyFormTypeChanged(v) => { state.proxy_form.proxy_type = v; Task::none() }
+        Message::ProxyFormHostChanged(v) => { state.proxy_form.host = v; Task::none() }
+        Message::ProxyFormPortChanged(v) => { state.proxy_form.port = v; Task::none() }
+        Message::ProxyFormUsernameChanged(v) => { state.proxy_form.username = v; Task::none() }
+        Message::ProxyFormPasswordChanged(v) => { state.proxy_form.password = v; Task::none() }
+        Message::SaveProxy => {
+            let ptype = if state.proxy_form.proxy_type == "http" {
+                crate::proxy::ProxyType::Http
+            } else {
+                crate::proxy::ProxyType::Socks5h
+            };
+            let port: u16 = state.proxy_form.port.parse().unwrap_or(1080);
+            let proxy = crate::proxy::ProxyConfig {
+                id: state.proxy_edit_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                name: state.proxy_form.name.clone(),
+                proxy_type: ptype,
+                host: state.proxy_form.host.clone(),
+                port,
+                username: if state.proxy_form.username.is_empty() { None } else { Some(state.proxy_form.username.clone()) },
+                password: if state.proxy_form.password.is_empty() { None } else { Some(state.proxy_form.password.clone()) },
+            };
+            if state.proxy_edit_id.is_some() {
+                state.proxy_store.update(&proxy);
+            } else {
+                state.proxy_store.add(proxy);
+            }
+            state.proxies = state.proxy_store.load();
+            state.show_proxy_form = false;
+            state.proxy_edit_id = None;
+            state.proxy_form = ProxyFormData::default();
+            Task::none()
+        }
+        Message::DeleteProxy(id) => {
+            state.proxy_store.delete(&id);
+            state.proxies = state.proxy_store.load();
+            Task::none()
+        }
+        Message::TestProxy(id) => {
+            if let Some(proxy) = state.proxies.iter().find(|p| p.id == id).cloned() {
+                let pid = id.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::proxy::test_proxy(&proxy)
+                        }).await.unwrap_or(crate::proxy::ProxyTestResult {
+                            reachable: false, latency_ms: 0,
+                            error: Some("Task failed".into()),
+                        })
+                    },
+                    move |result| Message::ProxyTestDone(pid.clone(), result),
+                );
+            }
+            Task::none()
+        }
+        Message::ProxyTestDone(id, result) => {
+            state.proxy_test_results.insert(id, result);
+            Task::none()
+        }
+        Message::FormProxyChanged(v) => {
+            state.form.proxy_id = v;
+            Task::none()
+        }
 
         // ---- language --------------------------------------------------------
         Message::ToggleLanguage => {
@@ -1934,65 +2537,41 @@ fn subscription(state: &NeoShell) -> Subscription<Message> {
         subs.push(time::every(Duration::from_secs(3)).map(|_| Message::FetchMonitorData));
     }
 
-    // When a form/dialog is open, only listen for Tab (focus cycling)
-    let any_modal = state.show_form || state.show_connect_dialog
-        || state.editor_file_path.is_some() || state.selected_interface.is_some();
-
-    if any_modal {
-        subs.push(event::listen().map(|evt| {
+    // Capture ALL events — keyboard always, scroll only when not captured by widgets
+    if state.screen == Screen::Main {
+        subs.push(event::listen_with(|evt, status, _window| {
             match evt {
-                iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Named(keyboard::key::Named::Tab), ..
-                }) => Message::FocusNext,
-                _ => Message::None,
-            }
-        }));
-    }
-
-    // Listen for ALL keyboard/mouse events when terminal is active and no modal
-    if state.screen == Screen::Main
-        && state.active_tab.is_some()
-        && !any_modal
-    {
-        subs.push(event::listen().map(|evt| {
-            match evt {
+                iced::Event::Window(iced::window::Event::Resized(size)) => {
+                    Some(Message::ResizeBottomPanel(-(size.height + 10000.0)))
+                }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
                     key, modifiers, text, ..
                 }) => {
-                    Message::KeyboardEvent(key, modifiers, text.map(|s| s.to_string()))
+                    Some(Message::KeyboardEvent(key, modifiers, text.map(|s| s.to_string())))
                 }
-                iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+                    if matches!(status, event::Status::Ignored) =>
+                {
+                    Some(Message::TerminalMouseDown(0.0, 0.0))
+                }
+                iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    Some(Message::TerminalMouseUp)
+                }
+                iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    Some(Message::TerminalMouseMove(position.x, position.y))
+                }
+                iced::Event::Mouse(mouse::Event::WheelScrolled { delta })
+                    if matches!(status, event::Status::Ignored) =>
+                {
                     match delta {
-                        mouse::ScrollDelta::Lines { y, .. } => {
-                            if y > 0.0 {
-                                Message::TerminalScrollUp(3)
-                            } else if y < 0.0 {
-                                Message::TerminalScrollDown(3)
-                            } else {
-                                Message::None
-                            }
-                        }
-                        mouse::ScrollDelta::Pixels { y, .. } => {
-                            if y > 0.0 {
-                                Message::TerminalScrollUp(1)
-                            } else if y < 0.0 {
-                                Message::TerminalScrollDown(1)
-                            } else {
-                                Message::None
-                            }
+                        mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => {
+                            if y > 0.0 { Some(Message::TerminalScrollUp(3)) }
+                            else if y < 0.0 { Some(Message::TerminalScrollDown(3)) }
+                            else { None }
                         }
                     }
                 }
-                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                    Message::TerminalMouseDown
-                }
-                iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                    Message::TerminalMouseUp
-                }
-                iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                    Message::TerminalMouseMove(position.x, position.y)
-                }
-                _ => Message::None,
+                _ => None,
             }
         }));
     }
@@ -2111,75 +2690,162 @@ fn view_unlock(state: &NeoShell) -> Element<'_, Message> {
         .into()
 }
 
-// ---- Main screen (tabs + sidebar + terminal + file browser) ---------------
+// ---- Main screen (FinalShell-inspired layout) -----------------------------
+//
+//  ┌──────────────────────────────────────────────────────┐
+//  │  Toolbar  [+New] [Proxy] [History] [Settings]        │
+//  ├──────────────────────────────────────────────────────┤
+//  │  Tab bar  [tab1] [tab2] [+]                          │
+//  ├────────────┬─────────────────────────────────────────┤
+//  │ Connections│           Terminal                       │
+//  │ (left 220) │       (center, Fill)                    │
+//  │            ├─────────────────────────────────────────┤
+//  │  search    │ [Monitor|Files|Cmd]  bottom panel 220px │
+//  │  list...   │  (tabbed panel with content)            │
+//  ├────────────┴─────────────────────────────────────────┤
+//  │  Status bar                                          │
+//  └──────────────────────────────────────────────────────┘
 
 fn view_main(state: &NeoShell) -> Element<'_, Message> {
+    let toolbar = view_toolbar(state);
     let tab_bar = view_tab_bar(state);
     let status_bar = view_status_bar(state);
 
-    let sidebar_width: f32 = if state.sidebar_collapsed { 0.0 } else { 280.0 };
+    let sidebar_width: f32 = if state.sidebar_collapsed { 0.0 } else { 220.0 };
 
-    let body: Element<'_, Message> = if state.active_tab.is_some() {
-        // Connected view: monitor sidebar + (terminal + file browser)
+    // ── Left: connection list (always visible) ──────────────────────
+    let left_panel: Element<'_, Message> = if state.sidebar_collapsed {
+        Space::new(0, 0).into()
+    } else {
+        container(view_sidebar(state))
+            .width(sidebar_width)
+            .height(Fill)
+            .into()
+    };
+
+    // ── Right side ──────────────────────────────────────────────────
+    let right_content: Element<'_, Message> = if state.active_tab.is_some() {
+        // Terminal (upper) + bottom panel (lower)
         let terminal = view_terminal_area(state);
-        let file_browser = view_file_browser(state);
 
-        let mut right_col = column![
+        // Transfer progress bar (if active)
+        let mut terminal_col = column![
             container(terminal).height(Fill),
         ];
         if let Some(progress) = &state.transfer_progress {
             if !progress.is_finished() {
-                right_col = right_col.push(view_transfer_progress(progress));
+                terminal_col = terminal_col.push(view_transfer_progress(progress));
             }
         }
-        right_col = right_col.push(file_browser);
 
-        let right_panel: Element<'_, Message> = right_col
+        // Drag splitter handle
+        let drag_color = if state.dragging_splitter { theme::ACCENT } else { theme::BORDER };
+        let splitter: Element<'_, Message> = container(Space::new(Fill, 4))
             .width(Fill)
-            .height(Fill)
+            .height(4)
+            .style(move |_| container::Style {
+                background: Some(drag_color.into()),
+                ..Default::default()
+            })
             .into();
 
-        if state.sidebar_collapsed {
-            row![right_panel].height(Fill).into()
-        } else {
-            let sidebar = view_monitor_sidebar(state);
-            row![
-                container(sidebar).width(sidebar_width).height(Fill),
-                right_panel,
-            ]
-            .height(Fill)
-            .into()
-        }
+        // Bottom panel with tabs: Monitor | Files | QuickCmd
+        let bottom_panel = view_bottom_panel(state);
+
+        column![
+            terminal_col.height(Fill),
+            splitter,
+            container(bottom_panel).height(state.bottom_panel_height),
+        ]
+        .height(Fill)
+        .into()
     } else {
-        // Not connected: connection list sidebar + welcome
-        let welcome = view_welcome();
-        if state.sidebar_collapsed {
-            row![container(welcome).width(Fill).height(Fill)]
-                .height(Fill)
-                .into()
-        } else {
-            let sidebar = view_sidebar(state);
-            row![
-                container(sidebar).width(sidebar_width).height(Fill),
-                container(welcome).width(Fill).height(Fill),
-            ]
-            .height(Fill)
-            .into()
-        }
+        // No active tab → welcome screen
+        view_welcome()
     };
 
+    // ── Compose main body ────────────────────────────────────────────
+    let body: Element<'_, Message> = row![
+        left_panel,
+        container(right_content).width(Fill).height(Fill),
+    ]
+    .height(Fill)
+    .into();
+
     let mut main_col = column![];
-    // Update notification bar (if any)
+    // Update notification bar
     if let Some(update_bar) = view_update_bar(state) {
         main_col = main_col.push(update_bar);
     }
+    main_col = main_col.push(toolbar);
     main_col = main_col.push(tab_bar);
     main_col = main_col.push(body);
     main_col = main_col.push(status_bar);
 
-    let main_layout: Element<'_, Message> = main_col
+    // If context menu is open, wrap main_col with the menu overlay
+    let main_layout: Element<'_, Message> = if let Some(ref ctx) = state.context_menu {
+        let menu = view_context_menu(ctx);
+        container(stack([
+            main_col.height(Fill).into(),
+            menu,
+        ]))
+        .width(Fill)
+        .height(Fill)
+        .into()
+    } else {
+        main_col.height(Fill).into()
+    };
+
+    // Delete confirmation dialog
+    if let Some((_, ref name)) = state.confirm_delete {
+        let msg = i18n::tf("confirm.delete", &[("name", name)]);
+        let confirm_card = container(
+            column![
+                text(msg).color(theme::TEXT_PRIMARY).size(14),
+                vertical_space().height(12),
+                row![
+                    button(text(i18n::t("form.cancel")).color(theme::TEXT_SECONDARY).size(13))
+                        .on_press(Message::CancelDelete)
+                        .padding(Padding::from([6, 16]))
+                        .style(transparent_button_style),
+                    button(text(i18n::t("dialog.delete")).color(Color::WHITE).size(13))
+                        .on_press(Message::ExecuteDelete)
+                        .padding(Padding::from([6, 16]))
+                        .style(|_: &Theme, _| button::Style {
+                            background: Some(theme::DANGER.into()),
+                            text_color: Color::WHITE,
+                            border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                            ..Default::default()
+                        }),
+                ].spacing(12),
+            ]
+            .align_x(alignment::Horizontal::Center)
+            .padding(24)
+        )
+        .style(|_| container::Style {
+            background: Some(theme::BG_SECONDARY.into()),
+            border: iced::Border { color: theme::BORDER, width: 1.0, radius: 8.0.into() },
+            shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.5), offset: iced::Vector::new(0.0, 4.0), blur_radius: 16.0 },
+            ..Default::default()
+        });
+        return container(stack([
+            container(main_layout).width(Fill).height(Fill).into(),
+            container(confirm_card).width(Fill).height(Fill).center_x(Fill).center_y(Fill)
+                .style(|_| container::Style { background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.5).into()), ..Default::default() }).into(),
+        ])).width(Fill).height(Fill).into();
+    }
+
+    // Process detail popup
+    if state.process_detail.is_some() {
+        let detail_overlay = view_process_detail(state);
+        return container(stack([
+            container(main_layout).width(Fill).height(Fill).into(),
+            detail_overlay,
+        ]))
+        .width(Fill)
         .height(Fill)
         .into();
+    }
 
     // Editor overlay (highest priority — on top of everything)
     if state.editor_file_path.is_some() {
@@ -2223,6 +2889,18 @@ fn view_main(state: &NeoShell) -> Element<'_, Message> {
         return container(stack([
             container(main_layout).width(Fill).height(Fill).into(),
             history_overlay,
+        ]))
+        .width(Fill)
+        .height(Fill)
+        .into();
+    }
+
+    // Proxy manager
+    if state.show_proxy_manager {
+        let proxy_overlay = view_proxy_manager(state);
+        return container(stack([
+            container(main_layout).width(Fill).height(Fill).into(),
+            proxy_overlay,
         ]))
         .width(Fill)
         .height(Fill)
@@ -2273,6 +2951,632 @@ fn view_main(state: &NeoShell) -> Element<'_, Message> {
 }
 
 // ---- Welcome screen (no active tab) --------------------------------------
+
+// ---- Process detail popup ---------------------------------------------------
+
+fn view_process_detail(state: &NeoShell) -> Element<'_, Message> {
+    let detail = match &state.process_detail {
+        Some(d) => d,
+        None => return Space::new(0, 0).into(),
+    };
+
+    let title = text(format!("Process {} Detail", detail.pid))
+        .size(16).color(theme::TEXT_PRIMARY);
+    let close_btn = button(text("x").font(Font::MONOSPACE).color(theme::TEXT_MUTED).size(14))
+        .on_press(Message::HideProcessDetail)
+        .padding(Padding::from([2, 8]))
+        .style(transparent_button_style);
+
+    let header = row![title, horizontal_space(), close_btn]
+        .align_y(alignment::Vertical::Center);
+
+    let mut body_col = column![].spacing(2);
+
+    // ── Basic Info ──────────────────────────────
+    body_col = body_col.push(
+        container(text(i18n::t("process.title")).color(theme::ACCENT).size(12)).padding(Padding::from([6, 0]))
+    );
+    for (key, val) in &detail.fields {
+        body_col = body_col.push(
+            row![
+                text(format!("{}:", key)).color(theme::TEXT_MUTED).size(10).width(95),
+                text(val.clone()).font(Font::MONOSPACE).color(theme::TEXT_PRIMARY).size(10),
+            ].spacing(8)
+        );
+    }
+
+    // ── Children ────────────────────────────────
+    if !detail.children.is_empty() {
+        body_col = body_col.push(container(text(format!("{} ({})", i18n::t("process.child"), detail.children.len())).color(theme::ACCENT).size(12)).padding(Padding::from([6, 0])));
+        // Header
+        body_col = body_col.push(
+            row![
+                text("PID").color(theme::TEXT_MUTED).size(9).width(60),
+                text("CPU%").color(theme::TEXT_MUTED).size(9).width(40),
+                text("MEM%").color(theme::TEXT_MUTED).size(9).width(40),
+                text("CMD").color(theme::TEXT_MUTED).size(9),
+            ].spacing(4)
+        );
+        for line in &detail.children {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let child_pid: u32 = parts[0].parse().unwrap_or(0);
+                let row_content = row![
+                    text(parts[0]).color(theme::TEXT_SECONDARY).size(9).width(60),
+                    text(parts[1]).color(theme::WARNING).size(9).width(40),
+                    text(parts[2]).color(theme::TEXT_SECONDARY).size(9).width(40),
+                    text(parts[3..].join(" ")).color(theme::TEXT_PRIMARY).size(9),
+                ].spacing(4);
+                body_col = body_col.push(
+                    button(row_content)
+                        .on_press(Message::InspectProcess(child_pid))
+                        .padding(Padding::from([1, 0]))
+                        .style(|_: &Theme, s| {
+                            let mut st = button::Style::default();
+                            if let button::Status::Hovered = s { st.background = Some(theme::BG_HOVER.into()); }
+                            st
+                        })
+                );
+            }
+        }
+    }
+
+    // ── Listening Ports ─────────────────────────
+    if !detail.listen_ports.is_empty() {
+        body_col = body_col.push(container(text(format!("{} ({})", i18n::t("process.listen"), detail.listen_ports.len())).color(theme::ACCENT).size(12)).padding(Padding::from([6, 0])));
+        for line in &detail.listen_ports {
+            body_col = body_col.push(
+                text(line).font(Font::MONOSPACE).color(theme::SUCCESS).size(9)
+            );
+        }
+    }
+
+    // ── Network Connections ─────────────────────
+    if !detail.net_conns.is_empty() {
+        body_col = body_col.push(container(text(format!("{} ({})", i18n::t("process.net"), detail.net_conns.len())).color(theme::ACCENT).size(12)).padding(Padding::from([6, 0])));
+        for line in &detail.net_conns {
+            body_col = body_col.push(
+                text(line).font(Font::MONOSPACE).color(theme::TEXT_SECONDARY).size(9)
+            );
+        }
+    }
+
+    // ── Open File Descriptors ───────────────────
+    if !detail.open_fds.is_empty() {
+        body_col = body_col.push(container(text(format!("{} ({})", i18n::t("process.fds"), detail.open_fds.len())).color(theme::ACCENT).size(12)).padding(Padding::from([6, 0])));
+        for fd in &detail.open_fds {
+            body_col = body_col.push(
+                text(fd).font(Font::MONOSPACE).color(theme::TEXT_MUTED).size(9)
+            );
+        }
+    }
+
+    // ── Threads ─────────────────────────────────
+    if !detail.threads.is_empty() {
+        body_col = body_col.push(container(text(format!("{} ({})", i18n::t("process.threads"), detail.threads.len())).color(theme::ACCENT).size(12)).padding(Padding::from([6, 0])));
+        let thread_ids = detail.threads.join(", ");
+        body_col = body_col.push(
+            text(thread_ids).font(Font::MONOSPACE).color(theme::TEXT_MUTED).size(9)
+        );
+    }
+
+    let content = column![
+        header,
+        scrollable(body_col).height(Fill),
+    ]
+    .spacing(6)
+    .padding(16)
+    .width(560);
+
+    let card = container(content)
+        .height(500)
+        .style(|_| container::Style {
+            background: Some(theme::BG_SECONDARY.into()),
+            border: iced::Border { color: theme::BORDER, width: 1.0, radius: 8.0.into() },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 20.0,
+            },
+            ..Default::default()
+        });
+
+    container(card)
+        .width(Fill)
+        .height(Fill)
+        .center_x(Fill)
+        .center_y(Fill)
+        .style(|_| container::Style {
+            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.5).into()),
+            ..Default::default()
+        })
+        .into()
+}
+
+// ---- Context menu (right-click on connection) -------------------------------
+
+fn view_context_menu(ctx: &ContextMenu) -> Element<'static, Message> {
+    let conn_id = ctx.conn_id.clone();
+    let conn_id2 = ctx.conn_id.clone();
+    let conn_id3 = ctx.conn_id.clone();
+
+    let connect_item = button(
+        text(i18n::t("dialog.connect_title").to_string()).color(theme::TEXT_PRIMARY).size(12)
+    )
+    .on_press(Message::ConnectTo(conn_id))
+    .padding(Padding::from([6, 16]))
+    .width(Fill)
+    .style(sidebar_item_style);
+
+    let edit_item = button(
+        text(i18n::t("dialog.edit").to_string()).color(theme::TEXT_PRIMARY).size(12)
+    )
+    .on_press(Message::ShowForm(Some(conn_id2)))
+    .padding(Padding::from([6, 16]))
+    .width(Fill)
+    .style(sidebar_item_style);
+
+    let delete_item = button(
+        text(i18n::t("dialog.delete").to_string()).color(theme::DANGER).size(12)
+    )
+    .on_press(Message::DeleteConnection(conn_id3))
+    .padding(Padding::from([6, 16]))
+    .width(Fill)
+    .style(sidebar_item_style);
+
+    let menu_card = container(
+        column![connect_item, edit_item, delete_item].spacing(1).width(140)
+    )
+    .style(|_| container::Style {
+        background: Some(theme::BG_SECONDARY.into()),
+        border: iced::Border { color: theme::BORDER, width: 1.0, radius: 6.0.into() },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+            offset: iced::Vector::new(2.0, 2.0),
+            blur_radius: 10.0,
+        },
+        ..Default::default()
+    })
+    .padding(4);
+
+    // Position the menu at the click coordinates using padding trick
+    let x = ctx.x.max(0.0);
+    let y = ctx.y.max(0.0);
+
+    // Transparent full-screen backdrop that closes menu on click
+    let backdrop = button(Space::new(Fill, Fill))
+        .on_press(Message::HideContextMenu)
+        .style(|_: &Theme, _| button::Style {
+            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.01).into()),
+            ..Default::default()
+        });
+
+    stack([
+        backdrop.width(Fill).height(Fill).into(),
+        container(menu_card)
+            .padding(Padding::new(0.0).top(y).left(x))
+            .width(Fill)
+            .height(Fill)
+            .into(),
+    ])
+    .into()
+}
+
+// ---- Toolbar (top action bar) -----------------------------------------------
+
+fn view_toolbar(state: &NeoShell) -> Element<'_, Message> {
+    let toolbar_style = |_: &Theme, status: button::Status| {
+        let mut s = button::Style::default();
+        s.background = None;
+        if let button::Status::Hovered = status {
+            s.background = Some(theme::BG_HOVER.into());
+            s.border = iced::Border { radius: 4.0.into(), ..Default::default() };
+        }
+        s
+    };
+
+    let sidebar_icon = if state.sidebar_collapsed { "|>" } else { "<|" };
+    let sidebar_btn = button(text(sidebar_icon).font(Font::MONOSPACE).color(theme::TEXT_SECONDARY).size(11))
+        .on_press(Message::ToggleSidebar)
+        .padding(Padding::from([4, 8]))
+        .style(|_: &Theme, status| {
+            let mut s = button::Style::default();
+            s.background = None;
+            if let button::Status::Hovered = status {
+                s.background = Some(theme::BG_HOVER.into());
+                s.border = iced::Border { radius: 4.0.into(), ..Default::default() };
+            }
+            s
+        });
+
+    // Vertical separator
+    let sep: Element<'_, Message> = container(Space::new(1, 16))
+        .style(|_| container::Style { background: Some(theme::BORDER.into()), ..Default::default() })
+        .into();
+
+    // Connected sessions count
+    let active_count = state.tabs.iter().filter(|t| !t.session_id.is_empty()).count();
+    let session_info = text(format!("{}/{}", active_count, state.connections.len()))
+        .color(theme::TEXT_MUTED).size(10);
+
+    let btn_new = button(text(i18n::t("dialog.new_btn")).color(theme::ACCENT).size(12))
+        .on_press(Message::ShowConnectDialog).padding(Padding::from([4, 10])).style(toolbar_style);
+    let btn_proxy = button(text(i18n::t("proxy.title")).color(theme::TEXT_SECONDARY).size(12))
+        .on_press(Message::ShowProxyManager).padding(Padding::from([4, 10])).style(toolbar_style);
+    let btn_history = button(text(i18n::t("history.title")).color(theme::TEXT_SECONDARY).size(12))
+        .on_press(Message::ShowHistory).padding(Padding::from([4, 10])).style(toolbar_style);
+    let btn_settings = button(text(i18n::t("settings.title")).color(theme::TEXT_SECONDARY).size(12))
+        .on_press(Message::ShowSettings).padding(Padding::from([4, 10])).style(toolbar_style);
+
+    let bar = row![
+        sidebar_btn,
+        sep,
+        btn_new,
+        btn_proxy,
+        btn_history,
+        horizontal_space(),
+        session_info,
+        btn_settings,
+    ]
+    .spacing(2)
+    .padding(Padding::from([2, 8]))
+    .align_y(alignment::Vertical::Center);
+
+    container(bar)
+        .width(Fill)
+        .height(30)
+        .style(|_| container::Style {
+            background: Some(theme::BG_TERTIARY.into()),
+            border: iced::Border {
+                color: theme::BORDER,
+                width: 0.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+// ---- Bottom panel (Monitor / Files / QuickCmd tabs) -------------------------
+
+fn view_bottom_panel(state: &NeoShell) -> Element<'_, Message> {
+    // Tab strip
+    let mon_active = state.bottom_panel_tab == BottomTab::Monitor;
+    let files_active = state.bottom_panel_tab == BottomTab::Files;
+    let cmd_active = state.bottom_panel_tab == BottomTab::QuickCmd;
+
+    let tab_monitor = button(
+        text(i18n::t("monitor.system")).color(if mon_active { theme::ACCENT } else { theme::TEXT_MUTED }).size(12)
+    )
+    .on_press(Message::SwitchBottomTab(BottomTab::Monitor))
+    .padding(Padding::from([5, 14]))
+    .style(move |_theme: &Theme, status| {
+        let mut s = button::Style::default();
+        s.background = None;
+        if mon_active {
+            s.border = iced::Border { color: theme::ACCENT, width: 2.0, radius: 0.0.into() };
+        }
+        if let button::Status::Hovered = status {
+            s.background = Some(theme::BG_HOVER.into());
+        }
+        s
+    });
+
+    let tab_files = button(
+        text(i18n::t("bottom.files")).color(if files_active { theme::ACCENT } else { theme::TEXT_MUTED }).size(12)
+    )
+    .on_press(Message::SwitchBottomTab(BottomTab::Files))
+    .padding(Padding::from([5, 14]))
+    .style(move |_theme: &Theme, status| {
+        let mut s = button::Style::default();
+        s.background = None;
+        if files_active {
+            s.border = iced::Border { color: theme::ACCENT, width: 2.0, radius: 0.0.into() };
+        }
+        if let button::Status::Hovered = status {
+            s.background = Some(theme::BG_HOVER.into());
+        }
+        s
+    });
+
+    let tab_cmd = button(
+        text(i18n::t("bottom.cmd")).color(if cmd_active { theme::ACCENT } else { theme::TEXT_MUTED }).size(12)
+    )
+    .on_press(Message::SwitchBottomTab(BottomTab::QuickCmd))
+    .padding(Padding::from([5, 14]))
+    .style(move |_theme: &Theme, status| {
+        let mut s = button::Style::default();
+        s.background = None;
+        if cmd_active {
+            s.border = iced::Border { color: theme::ACCENT, width: 2.0, radius: 0.0.into() };
+        }
+        if let button::Status::Hovered = status {
+            s.background = Some(theme::BG_HOVER.into());
+        }
+        s
+    });
+
+    let tab_strip = container(
+        row![tab_monitor, tab_files, tab_cmd].spacing(2).padding(Padding::from([2, 6]))
+    )
+    .width(Fill)
+    .style(|_| container::Style {
+        background: Some(theme::BG_TERTIARY.into()),
+        border: iced::Border { color: theme::BORDER, width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    });
+
+    // Panel content based on selected tab
+    let panel_content: Element<'_, Message> = match state.bottom_panel_tab {
+        BottomTab::Monitor => view_monitor_panel(state),
+        BottomTab::Files => {
+            // Dual pane: local (left) | separator | remote (right)
+            let local_panel = view_local_files(state);
+            let remote_panel = view_file_browser(state);
+            let sep: Element<'_, Message> = container(Space::new(1, Fill))
+                .style(|_| container::Style { background: Some(theme::BORDER.into()), ..Default::default() })
+                .into();
+            row![
+                container(local_panel).width(Fill).height(Fill),
+                sep,
+                container(remote_panel).width(Fill).height(Fill),
+            ].height(Fill).into()
+        }
+        BottomTab::QuickCmd => view_quick_commands(state),
+    };
+
+    column![
+        tab_strip,
+        container(panel_content).width(Fill).height(Fill),
+    ]
+    .into()
+}
+
+// ---- Monitor panel (horizontal layout for bottom area) ----------------------
+
+fn view_monitor_panel(state: &NeoShell) -> Element<'_, Message> {
+    let active_session = state.active_tab
+        .and_then(|idx| state.tabs.get(idx))
+        .map(|t| t.session_id.as_str());
+    let sid = match active_session {
+        Some(s) if !s.is_empty() => s,
+        _ => return container(text(i18n::t("monitor.connecting")).color(theme::TEXT_MUTED).size(12))
+            .padding(Padding::from([12, 12])).into(),
+    };
+
+    let stats = state.server_stats.get(sid);
+    let processes = state.top_processes.get(sid);
+
+    // ── Column 1: System info ──────────────────────────────────────
+    let mut sys_col = column![
+        text(i18n::t("monitor.system")).color(theme::TEXT_PRIMARY).size(11),
+    ].spacing(2);
+    if let Some(s) = stats {
+        sys_col = sys_col.push(sys_row(&i18n::t("monitor.load"), &format!("{:.2} / {:.2} / {:.2}", s.load_1m, s.load_5m, s.load_15m)));
+        sys_col = sys_col.push(sys_row(i18n::t("monitor.cpu"), &i18n::tf("monitor.cpu_cores", &[("count", &s.cpu_cores.to_string())])));
+        sys_col = sys_col.push(sys_row(&i18n::t("monitor.mem"), &format!("{} / {} MB ({:.0}%)", s.mem_used_mb, s.mem_total_mb, s.mem_percent)));
+        sys_col = sys_col.push(progress_bar_widget(s.mem_percent));
+        if !s.disks.is_empty() {
+            for d in &s.disks {
+                sys_col = sys_col.push(sys_row(&truncate_str(&d.mount_point, 10), &format!("{}/{} ({:.0}%)", d.used, d.total, d.percent)));
+                sys_col = sys_col.push(progress_bar_widget(d.percent));
+            }
+        }
+        if !s.uptime.is_empty() {
+            sys_col = sys_col.push(sys_row(&i18n::t("monitor.uptime"), &s.uptime));
+        }
+    } else {
+        sys_col = sys_col.push(text(i18n::t("monitor.connecting")).color(theme::TEXT_MUTED).size(11));
+    }
+
+    // ── Column 2: Network interfaces ───────────────────────────────
+    let mut net_col = column![
+        text(i18n::t("monitor.network")).color(theme::TEXT_PRIMARY).size(11),
+    ].spacing(1);
+
+    if let Some(s) = stats {
+        // Speed summary
+        let rx_rate = state.net_rx_rate.get(sid).copied().unwrap_or(0.0);
+        let tx_rate = state.net_tx_rate.get(sid).copied().unwrap_or(0.0);
+        net_col = net_col.push(
+            row![
+                text(i18n::t("net.speed")).color(theme::TEXT_MUTED).size(9).width(80),
+                text(format!("D {}/s", format_bytes(rx_rate as u64))).color(theme::SUCCESS).size(9).width(80),
+                text(format!("U {}/s", format_bytes(tx_rate as u64))).color(theme::SUCCESS).size(9),
+            ].spacing(4)
+        );
+
+        // Table header
+        net_col = net_col.push(
+            row![
+                text(i18n::t("net.interface")).color(theme::TEXT_MUTED).size(8).width(80),
+                text(i18n::t("net.received")).color(theme::TEXT_MUTED).size(8).width(80),
+                text(i18n::t("net.sent")).color(theme::TEXT_MUTED).size(8),
+            ].spacing(4)
+        );
+
+        // Per-interface rows
+        for (i, iface) in s.interfaces.iter().enumerate() {
+            if iface.name == "lo" { continue; }
+            let is_physical = iface.name.starts_with("eth") || iface.name.starts_with("en")
+                || iface.name.starts_with("wl") || iface.name.starts_with("bond");
+            let name_color = if is_physical { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED };
+            let row_bg = if i % 2 == 0 { theme::BG_SECONDARY } else { theme::BG_TERTIARY };
+
+            let iface_row = row![
+                text(truncate_str(&iface.name, 10)).color(name_color).size(9).width(80),
+                text(format_bytes(iface.rx_bytes)).color(theme::TEXT_SECONDARY).size(9).width(80),
+                text(format_bytes(iface.tx_bytes)).color(theme::TEXT_SECONDARY).size(9),
+            ].spacing(4);
+
+            let iface_clone = iface.clone();
+            net_col = net_col.push(
+                button(
+                    container(iface_row)
+                        .padding(Padding::from([1, 2]))
+                        .width(Fill)
+                        .style(move |_| container::Style { background: Some(row_bg.into()), ..Default::default() })
+                )
+                .on_press(Message::ShowNetworkDetail(iface_clone))
+                .padding(0)
+                .width(Fill)
+                .style(transparent_button_style)
+            );
+        }
+
+        // Total row
+        net_col = net_col.push(
+            container(
+                row![
+                    text(i18n::t("monitor.total")).color(theme::ACCENT).size(9).width(80),
+                    text(format_bytes(s.net_rx_bytes)).color(theme::ACCENT).size(9).width(80),
+                    text(format_bytes(s.net_tx_bytes)).color(theme::ACCENT).size(9),
+                ].spacing(4)
+            ).padding(Padding::from([2, 2]))
+        );
+    }
+
+    // ── Column 3: Processes ────────────────────────────────────────
+    let mut proc_col = column![
+        text(i18n::t("monitor.processes")).color(theme::TEXT_PRIMARY).size(11),
+        row![
+            text("PID").color(theme::TEXT_MUTED).size(8).width(44),
+            text("CPU").color(theme::TEXT_MUTED).size(8).width(32),
+            text("MEM").color(theme::TEXT_MUTED).size(8).width(32),
+            text("CMD").color(theme::TEXT_MUTED).size(8),
+        ].spacing(1),
+    ].spacing(1);
+
+    if let Some(procs) = processes {
+        for (i, p) in procs.iter().take(15).enumerate() {
+            let color = if p.cpu > 50.0 { theme::DANGER }
+                       else if p.cpu > 20.0 { theme::WARNING }
+                       else { theme::TEXT_SECONDARY };
+            let row_bg = if i % 2 == 0 { theme::BG_SECONDARY } else { theme::BG_TERTIARY };
+            let pid_val = p.pid;
+            let prow = row![
+                text(format!("{}", p.pid)).color(color).size(9).width(44),
+                text(format!("{:.1}", p.cpu)).color(color).size(9).width(32),
+                text(format!("{:.1}", p.mem)).color(color).size(9).width(32),
+                text(&p.command).color(color).size(9),
+            ].spacing(1);
+            proc_col = proc_col.push(
+                button(
+                    container(prow).padding(Padding::from([2, 2])).width(Fill)
+                        .style(move |_| container::Style { background: Some(row_bg.into()), ..Default::default() })
+                )
+                .on_press(Message::InspectProcess(pid_val))
+                .padding(0)
+                .width(Fill)
+                .style(|_: &Theme, status| {
+                    let mut s = button::Style::default();
+                    s.background = None;
+                    if let button::Status::Hovered = status {
+                        s.background = Some(theme::BG_HOVER.into());
+                    }
+                    s
+                })
+            );
+        }
+    }
+
+    // ── Layout: 2 main columns (left=sys+net, right=processes) ─────
+    let left_combined = column![].push(sys_col).push(net_col).spacing(4);
+
+    let left_panel = scrollable(left_combined).height(Fill);
+    let right_panel = scrollable(proc_col).height(Fill);
+
+    // Separator
+    let sep: Element<'_, Message> = container(Space::new(1, Fill))
+        .style(|_| container::Style {
+            background: Some(theme::BORDER.into()),
+            ..Default::default()
+        })
+        .into();
+
+    row![
+        container(left_panel).width(Fill).padding(Padding::from([4, 6])),
+        sep,
+        container(right_panel).width(Fill).padding(Padding::from([4, 4])),
+    ]
+    .height(Fill)
+    .into()
+}
+
+// ---- Quick commands panel ---------------------------------------------------
+
+fn view_quick_commands(state: &NeoShell) -> Element<'_, Message> {
+    // Input bar at top
+    let cmd_input = text_input("Enter command...", &state.quick_cmd_input)
+        .on_input(Message::QuickCmdInputChanged)
+        .on_submit(Message::SendQuickCmd)
+        .padding(6)
+        .size(12);
+
+    let send_btn = button(
+        text(i18n::t("btn.send")).color(Color::WHITE).size(11)
+    )
+    .on_press(Message::SendQuickCmd)
+    .padding(Padding::from([6, 14]))
+    .style(accent_button_style);
+
+    let input_bar = container(
+        row![cmd_input, send_btn].spacing(4).align_y(alignment::Vertical::Center)
+    )
+    .padding(Padding::from([4, 6]))
+    .width(Fill)
+    .style(|_| container::Style {
+        background: Some(theme::BG_TERTIARY.into()),
+        border: iced::Border { color: theme::BORDER, width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    });
+
+    // Recent unique commands list
+    let mut col = column![].spacing(2);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut count = 0;
+    for record in state.cmd_history.iter().rev() {
+        if seen.contains(&record.cmd) { continue; }
+        seen.insert(record.cmd.clone());
+        if count >= 30 { break; }
+        count += 1;
+
+        let cmd_display = record.cmd.clone();
+        let cmd_action = record.cmd.clone();
+        let i = count;
+        let row_bg = if i % 2 == 0 { theme::BG_SECONDARY } else { theme::BG_TERTIARY };
+        let btn = button(
+            text(cmd_display).font(Font::MONOSPACE).color(theme::TEXT_PRIMARY).size(11)
+        )
+        .on_press(Message::ReplayCommand(cmd_action))
+        .padding(Padding::from([3, 8]))
+        .width(Fill)
+        .style(move |_theme: &Theme, status| {
+            let mut s = button::Style::default();
+            s.background = Some(row_bg.into());
+            if let button::Status::Hovered = status {
+                s.background = Some(theme::BG_HOVER.into());
+            }
+            s
+        });
+        col = col.push(btn);
+    }
+
+    if count == 0 {
+        col = col.push(
+            container(text(i18n::t("history.empty")).color(theme::TEXT_MUTED).size(12))
+                .padding(Padding::from([12, 8]))
+        );
+    }
+
+    column![
+        input_bar,
+        scrollable(col).height(Fill),
+    ].into()
+}
+
+// ---- Welcome screen (no active tab) ----------------------------------------
 
 fn view_welcome() -> Element<'static, Message> {
     let wtitle = i18n::t("welcome.title").to_string();
@@ -2552,27 +3856,53 @@ fn view_sidebar(state: &NeoShell) -> Element<'_, Message> {
         );
 
         for conn in conns {
-            let status_dot = text("\u{25CF} ").color(theme::SUCCESS).size(10);
+            // Show green dot if this connection has an active tab
+            let is_connected = state.tabs.iter().any(|t| t.connection_id == conn.id && !t.session_id.is_empty());
+            let dot_color = if is_connected { theme::SUCCESS } else { theme::TEXT_MUTED };
+            let status_dot = text("\u{25CF} ").color(dot_color).size(10);
             let name_label = text(&conn.name).color(theme::TEXT_PRIMARY).size(13);
             let host_label = text(format!("{}@{}:{}", conn.username, conn.host, conn.port))
                 .color(theme::TEXT_MUTED)
                 .size(11);
 
-            let conn_content = column![
-                row![status_dot, name_label].align_y(alignment::Vertical::Center),
-                host_label,
-            ]
-            .spacing(2);
+            let proxy_tag: Element<'_, Message> = if conn.proxy_id.is_some() {
+                text("P").font(Font::MONOSPACE).color(theme::WARNING).size(9).into()
+            } else {
+                Space::new(0, 0).into()
+            };
 
             let conn_id = conn.id.clone();
+            let conn_id_edit = conn.id.clone();
+            let conn_id_del = conn.id.clone();
 
-            let connect_btn = button(conn_content)
-                .on_press(Message::ConnectTo(conn_id))
-                .padding(Padding::from([6, 12]))
-                .width(Fill)
-                .style(sidebar_item_style);
+            // Edit button (pencil)
+            let edit_btn = button(text(i18n::t("btn.edit")).color(theme::TEXT_MUTED).size(9))
+                .on_press(Message::ShowForm(Some(conn_id_edit)))
+                .padding(Padding::from([2, 4]))
+                .style(transparent_button_style);
 
-            list_col = list_col.push(connect_btn);
+            let del_btn = button(text(i18n::t("dialog.delete")).color(theme::DANGER).size(9))
+                .on_press(Message::DeleteConnection(conn_id_del))
+                .padding(Padding::from([2, 4]))
+                .style(transparent_button_style);
+
+            let info_col = column![
+                row![status_dot, name_label, proxy_tag].spacing(4).align_y(alignment::Vertical::Center),
+                host_label,
+            ].spacing(2);
+
+            let conn_row = row![
+                button(info_col)
+                    .on_press(Message::ConnectTo(conn_id))
+                    .padding(Padding::from([6, 8]))
+                    .width(Fill)
+                    .style(sidebar_item_style),
+                column![edit_btn, del_btn].spacing(0),
+            ]
+            .spacing(0)
+            .align_y(alignment::Vertical::Center);
+
+            list_col = list_col.push(conn_row);
         }
     }
 
@@ -2930,6 +4260,7 @@ fn view_terminal_area(state: &NeoShell) -> Element<'_, Message> {
                 grid: tab.terminal.clone(),
                 selection_start: state.selection_start,
                 selection_end: state.selection_end,
+                font_size: state.font_size,
             };
 
             return canvas(term_view).width(Fill).height(Fill).into();
@@ -2940,7 +4271,7 @@ fn view_terminal_area(state: &NeoShell) -> Element<'_, Message> {
     let placeholder = column![
         vertical_space().height(80),
         text("NeoShell").size(36).color(theme::TEXT_MUTED),
-        text("Select a connection from the sidebar to begin")
+        text(i18n::t("welcome.select"))
             .size(14)
             .color(theme::TEXT_MUTED),
     ]
@@ -3036,6 +4367,107 @@ fn view_transfer_progress(progress: &TransferProgress) -> Element<'static, Messa
 
 // ---- File browser --------------------------------------------------------
 
+// ---- Local file panel (left side of Files tab) ------------------------------
+
+fn view_local_files(state: &NeoShell) -> Element<'_, Message> {
+    let path_input = text_input("Local path...", &state.local_path)
+        .on_input(Message::LocalPathChanged)
+        .on_submit(Message::LocalPathSubmit)
+        .padding(4)
+        .size(11);
+
+    let refresh_btn = button(text(i18n::t("btn.refresh")).color(theme::ACCENT).size(11))
+        .on_press(Message::RefreshLocalFiles)
+        .padding(Padding::from([4, 8]))
+        .style(transparent_button_style);
+
+    // Upload button (visible when a file is selected)
+    let upload_area: Element<'_, Message> = if let Some(ref sel) = state.selected_local_file {
+        let fname = std::path::Path::new(sel).file_name()
+            .map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        button(
+            text(format!("{} {}", i18n::t("file.send_prefix"), fname)).color(Color::WHITE).size(10)
+        )
+        .on_press(Message::UploadLocalFile)
+        .padding(Padding::from([3, 8]))
+        .style(accent_button_style)
+        .into()
+    } else {
+        Space::new(0, 0).into()
+    };
+
+    let header = container(
+        column![
+            row![path_input, refresh_btn].spacing(2).align_y(alignment::Vertical::Center).padding(Padding::from([2, 4])),
+            upload_area,
+        ].spacing(2)
+    )
+    .width(Fill)
+    .style(|_| container::Style {
+        background: Some(theme::BG_TERTIARY.into()),
+        ..Default::default()
+    });
+
+    // File list
+    let entries = if state.local_entries.is_empty() {
+        list_local_dir(&state.local_path)
+    } else {
+        state.local_entries.clone()
+    };
+
+    let mut file_col = column![].spacing(0);
+
+    // Parent directory
+    if let Some(parent) = std::path::Path::new(&state.local_path).parent() {
+        let parent_path = parent.to_string_lossy().to_string();
+        file_col = file_col.push(
+            button(text("..").color(theme::ACCENT).size(10))
+                .on_press(Message::LocalFileClicked(parent_path))
+                .padding(Padding::from([2, 6]))
+                .width(Fill)
+                .style(sidebar_item_style)
+        );
+    }
+
+    for (i, entry) in entries.iter().enumerate() {
+        let (icon, color) = if entry.is_dir { ("D", theme::ACCENT) } else { ("F", theme::TEXT_PRIMARY) };
+        let size_str = if entry.is_dir { String::new() } else { format_bytes(entry.size) };
+        let path = entry.path.clone();
+        let is_selected = state.selected_local_file.as_deref() == Some(&entry.path);
+        let row_bg = if is_selected {
+            theme::BG_HOVER
+        } else if i % 2 == 0 {
+            theme::BG_SECONDARY
+        } else {
+            theme::BG_TERTIARY
+        };
+
+        let entry_row = row![
+            text(format!("{} {}", icon, &entry.name)).color(color).size(10).width(Fill),
+            text(size_str).color(theme::TEXT_MUTED).size(9),
+        ].spacing(4);
+
+        file_col = file_col.push(
+            button(
+                container(entry_row).padding(Padding::from([2, 6])).width(Fill)
+                    .style(move |_| container::Style { background: Some(row_bg.into()), ..Default::default() })
+            )
+            .on_press(Message::LocalFileClicked(path))
+            .padding(0).width(Fill)
+            .style(|_: &Theme, status| {
+                let mut s = button::Style::default();
+                if let button::Status::Hovered = status { s.background = Some(theme::BG_HOVER.into()); }
+                s
+            })
+        );
+    }
+
+    column![header, scrollable(file_col).height(Fill)]
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
 fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
     let active_session = state
         .active_tab
@@ -3055,9 +4487,17 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
 
     let entries = state.file_entries.get(&sid);
 
-    // Header with path and upload button
-    let path_label = text(i18n::tf("filebrowser.dir", &[("path", current_path)]))
-        .color(theme::TEXT_PRIMARY)
+    // Header with editable path input and upload button
+    let path_value = if state.path_input.is_empty() {
+        current_path.to_string()
+    } else {
+        state.path_input.clone()
+    };
+
+    let path_input = text_input("/path/to/dir", &path_value)
+        .on_input(Message::PathInputChanged)
+        .on_submit(Message::PathInputSubmit)
+        .padding(4)
         .size(12);
 
     let upload_btn = button(text(i18n::t("filebrowser.upload")).color(theme::SUCCESS).size(11))
@@ -3065,11 +4505,17 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
         .padding(Padding::from([4, 8]))
         .style(transparent_button_style);
 
+    let remote_refresh = button(text(i18n::t("btn.refresh")).color(theme::ACCENT).size(11))
+        .on_press(Message::RefreshRemoteFiles)
+        .padding(Padding::from([4, 8]))
+        .style(transparent_button_style);
+
     let header = container(
-        row![path_label, horizontal_space(), upload_btn]
+        row![path_input, remote_refresh, upload_btn]
+            .spacing(4)
             .align_y(alignment::Vertical::Center),
     )
-    .padding(Padding::from([6, 10]))
+    .padding(Padding::from([4, 6]))
     .width(Fill)
     .style(|_| container::Style {
         background: Some(theme::BG_TERTIARY.into()),
@@ -3081,7 +4527,22 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
         ..Default::default()
     });
 
-    let mut file_col = column![].spacing(0);
+    // Column headers
+    let file_header = container(
+        row![
+            container(text(i18n::t("file.name")).color(theme::TEXT_MUTED).size(10)).width(Fill),
+            container(text(i18n::t("file.size")).color(theme::TEXT_MUTED).size(10)).width(80).align_x(alignment::Horizontal::Right),
+            container(text(i18n::t("file.modified")).color(theme::TEXT_MUTED).size(10)).width(120).align_x(alignment::Horizontal::Center),
+            container(Space::new(70, 0)).width(70),
+        ].spacing(4).padding(Padding::from([2, 8]))
+    )
+    .width(Fill)
+    .style(|_| container::Style {
+        background: Some(theme::BG_TERTIARY.into()),
+        ..Default::default()
+    });
+
+    let mut file_col = column![file_header].spacing(0);
 
     if let Some(entries) = entries {
         // Build unified file entries (including ".." parent)
@@ -3123,13 +4584,13 @@ fn view_file_browser(state: &NeoShell) -> Element<'_, Message> {
                 let current = state.current_dir.get(&sid).cloned().unwrap_or("~".to_string());
                 let full_path = format!("{}/{}", current.trim_end_matches('/'), entry.name);
 
-                let dl_btn = button(text("v").color(theme::ACCENT).size(10))
+                let dl_btn = button(text(i18n::t("btn.download")).color(theme::ACCENT).size(10))
                     .on_press(Message::DownloadFile(sid.clone(), full_path.clone()))
                     .padding(Padding::from([1, 3]))
                     .style(transparent_button_style);
 
                 if crate::ssh::is_editable_file(&entry.name) {
-                    let edit_btn = button(text("E").color(theme::SUCCESS).size(10))
+                    let edit_btn = button(text(i18n::t("btn.edit")).color(theme::SUCCESS).size(10))
                         .on_press(Message::OpenEditor(sid.clone(), full_path))
                         .padding(Padding::from([1, 3]))
                         .style(transparent_button_style);
@@ -3521,6 +4982,146 @@ fn view_editor(state: &NeoShell) -> Element<'_, Message> {
 
 // ---- Status bar ----------------------------------------------------------
 
+// ---- Proxy manager ----------------------------------------------------------
+
+fn view_proxy_manager(state: &NeoShell) -> Element<'_, Message> {
+    let title = text(i18n::t("proxy.title")).size(16).color(theme::TEXT_PRIMARY);
+    let close_btn = button(text("x").font(Font::MONOSPACE).color(theme::TEXT_MUTED).size(14))
+        .on_press(Message::HideProxyManager)
+        .padding(Padding::from([2, 8]))
+        .style(transparent_button_style);
+    let add_btn = button(text(i18n::t("proxy.add")).font(Font::MONOSPACE).color(theme::ACCENT).size(11))
+        .on_press(Message::ShowProxyForm(None))
+        .padding(Padding::from([4, 8]))
+        .style(transparent_button_style);
+
+    let header = row![title, horizontal_space(), add_btn, close_btn]
+        .align_y(alignment::Vertical::Center);
+
+    let mut list_col = column![].spacing(4);
+
+    // Proxy form (inline)
+    if state.show_proxy_form {
+        let form_title = if state.proxy_edit_id.is_some() {
+            i18n::t("proxy.edit")
+        } else {
+            i18n::t("proxy.add")
+        };
+        let name_input = text_input(i18n::t("proxy.name"), &state.proxy_form.name)
+            .on_input(Message::ProxyFormNameChanged).padding(6).size(12);
+        let host_input = text_input(i18n::t("proxy.host"), &state.proxy_form.host)
+            .on_input(Message::ProxyFormHostChanged).padding(6).size(12);
+        let port_input = text_input(i18n::t("proxy.port"), &state.proxy_form.port)
+            .on_input(Message::ProxyFormPortChanged).padding(6).size(12).width(80);
+        let user_input = text_input(i18n::t("proxy.username"), &state.proxy_form.username)
+            .on_input(Message::ProxyFormUsernameChanged).padding(6).size(12);
+        let pass_input = text_input(i18n::t("proxy.password"), &state.proxy_form.password)
+            .on_input(Message::ProxyFormPasswordChanged).padding(6).size(12).secure(true);
+
+        let type_socks = button(
+            text("SOCKS5H").color(if state.proxy_form.proxy_type == "socks5h" { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED }).size(11)
+        ).on_press(Message::ProxyFormTypeChanged("socks5h".into())).padding(Padding::from([4, 8]))
+         .style(if state.proxy_form.proxy_type == "socks5h" { accent_button_style } else { transparent_button_style });
+        let type_http = button(
+            text("HTTP").color(if state.proxy_form.proxy_type == "http" { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED }).size(11)
+        ).on_press(Message::ProxyFormTypeChanged("http".into())).padding(Padding::from([4, 8]))
+         .style(if state.proxy_form.proxy_type == "http" { accent_button_style } else { transparent_button_style });
+
+        let save_btn = button(text(i18n::t("proxy.save")).color(theme::TEXT_PRIMARY).size(11))
+            .on_press(Message::SaveProxy).padding(Padding::from([4, 12])).style(accent_button_style);
+        let cancel_btn = button(text(i18n::t("proxy.cancel")).color(theme::TEXT_MUTED).size(11))
+            .on_press(Message::HideProxyForm).padding(Padding::from([4, 8])).style(transparent_button_style);
+
+        let form_content = column![
+            text(form_title).color(theme::TEXT_PRIMARY).size(13),
+            name_input,
+            row![type_socks, type_http].spacing(4),
+            row![host_input, port_input].spacing(4),
+            user_input,
+            pass_input,
+            row![cancel_btn, save_btn].spacing(8),
+        ].spacing(6).padding(10).width(Fill);
+
+        list_col = list_col.push(
+            container(form_content).style(|_| container::Style {
+                background: Some(theme::BG_TERTIARY.into()),
+                border: iced::Border { color: theme::BORDER, width: 1.0, radius: 4.0.into() },
+                ..Default::default()
+            })
+        );
+    }
+
+    // Proxy list
+    if state.proxies.is_empty() && state.proxy_edit_id.is_none() {
+        list_col = list_col.push(
+            container(text(i18n::t("proxy.empty")).color(theme::TEXT_MUTED).size(12))
+                .padding(Padding::from([16, 8])),
+        );
+    }
+    for proxy in &state.proxies {
+        let pid = proxy.id.clone();
+        let pid2 = proxy.id.clone();
+        let pid3 = proxy.id.clone();
+
+        let type_label = format!("{}", proxy.proxy_type);
+        let addr = format!("{}:{}", proxy.host, proxy.port);
+
+        let test_status: Element<'_, Message> = if let Some(result) = state.proxy_test_results.get(&proxy.id) {
+            if result.reachable {
+                text(format!("{} {}ms", i18n::t("proxy.ok"), result.latency_ms))
+                    .color(theme::SUCCESS).size(10).into()
+            } else {
+                text(format!("{} {}", i18n::t("proxy.fail"), result.error.as_deref().unwrap_or("")))
+                    .color(theme::DANGER).size(10).into()
+            }
+        } else {
+            text("").size(1).into()
+        };
+
+        let test_btn = button(text(i18n::t("proxy.test")).font(Font::MONOSPACE).color(theme::ACCENT).size(10))
+            .on_press(Message::TestProxy(pid.clone())).padding(Padding::from([2, 6])).style(transparent_button_style);
+        let edit_btn = button(text(i18n::t("proxy.edit")).font(Font::MONOSPACE).color(theme::TEXT_SECONDARY).size(10))
+            .on_press(Message::ShowProxyForm(Some(pid2))).padding(Padding::from([2, 6])).style(transparent_button_style);
+        let del_btn = button(text(i18n::t("proxy.delete")).font(Font::MONOSPACE).color(theme::DANGER).size(10))
+            .on_press(Message::DeleteProxy(pid3)).padding(Padding::from([2, 6])).style(transparent_button_style);
+
+        let entry = row![
+            column![
+                text(&proxy.name).color(theme::TEXT_PRIMARY).size(12),
+                row![text(type_label).color(theme::TEXT_MUTED).size(10), text(addr).color(theme::TEXT_MUTED).size(10)].spacing(8),
+            ].spacing(2).width(Fill),
+            test_status,
+            test_btn,
+            edit_btn,
+            del_btn,
+        ].spacing(4).align_y(alignment::Vertical::Center);
+
+        list_col = list_col.push(
+            container(entry).padding(Padding::from([6, 10])).width(Fill)
+                .style(|_| container::Style {
+                    background: Some(theme::BG_TERTIARY.into()),
+                    border: iced::Border { color: theme::BORDER, width: 1.0, radius: 4.0.into() },
+                    ..Default::default()
+                })
+        );
+    }
+
+    let content = column![header, scrollable(list_col).height(Fill)]
+        .spacing(10).padding(16).width(420);
+
+    let card = container(content).height(Fill).style(|_| container::Style {
+        background: Some(theme::BG_SECONDARY.into()),
+        border: iced::Border { color: theme::BORDER, width: 1.0, radius: 0.0.into() },
+        shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.4), offset: iced::Vector::new(-4.0, 0.0), blur_radius: 16.0 },
+        ..Default::default()
+    });
+
+    let overlay = row![horizontal_space(), card];
+    container(overlay).width(Fill).height(Fill)
+        .style(|_| container::Style { background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.3).into()), ..Default::default() })
+        .into()
+}
+
 // ---- Command history panel --------------------------------------------------
 
 fn view_history_panel(state: &NeoShell) -> Element<'_, Message> {
@@ -3695,6 +5296,21 @@ fn view_settings_menu(state: &NeoShell) -> Element<'_, Message> {
     let sidebar_row = row![sidebar_label, horizontal_space(), sidebar_btn]
         .align_y(alignment::Vertical::Center);
 
+    // Font size
+    let font_label = text(i18n::t("settings.font_size")).color(theme::TEXT_SECONDARY).size(13);
+    let font_pct = format!("{:.0}px", state.font_size);
+    let font_down = button(text("-").font(Font::MONOSPACE).color(theme::TEXT_SECONDARY).size(14))
+        .on_press(Message::SetFontSize(state.font_size - 1.0))
+        .padding(Padding::from([2, 8]))
+        .style(transparent_button_style);
+    let font_up = button(text("+").font(Font::MONOSPACE).color(theme::TEXT_SECONDARY).size(14))
+        .on_press(Message::SetFontSize(state.font_size + 1.0))
+        .padding(Padding::from([2, 8]))
+        .style(transparent_button_style);
+    let font_row = row![font_label, horizontal_space(), font_down, text(font_pct).color(theme::TEXT_PRIMARY).size(13), font_up]
+        .spacing(4)
+        .align_y(alignment::Vertical::Center);
+
     // Divider
     let divider: Element<'_, Message> = container(Space::new(Fill, 1))
         .width(Fill)
@@ -3703,6 +5319,20 @@ fn view_settings_menu(state: &NeoShell) -> Element<'_, Message> {
             ..Default::default()
         })
         .into();
+
+    // Proxy manager button
+    let proxy_btn = button(
+        row![
+            text(i18n::t("proxy.title")).color(theme::TEXT_SECONDARY).size(13),
+            horizontal_space(),
+            text(">").font(Font::MONOSPACE).color(theme::TEXT_MUTED).size(12),
+        ]
+        .align_y(alignment::Vertical::Center)
+    )
+    .on_press(Message::ShowProxyManager)
+    .padding(Padding::from([8, 0]))
+    .width(Fill)
+    .style(transparent_button_style);
 
     // About button
     let about_btn = button(
@@ -3721,9 +5351,11 @@ fn view_settings_menu(state: &NeoShell) -> Element<'_, Message> {
     let menu_content = column![
         header,
         lang_row,
+        font_row,
         scale_row,
         sidebar_row,
         divider,
+        proxy_btn,
         about_btn,
     ]
     .spacing(12)
@@ -3820,34 +5452,49 @@ fn view_about_dialog(_state: &NeoShell) -> Element<'static, Message> {
 // ---- Status bar ------------------------------------------------------------
 
 fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
-    // Sidebar toggle
-    let toggle_icon = if state.sidebar_collapsed { "[>]" } else { "[<]" };
-    let toggle_btn = button(text(toggle_icon).font(Font::MONOSPACE).color(theme::TEXT_SECONDARY).size(11))
-        .on_press(Message::ToggleSidebar)
-        .padding(Padding::from([2, 6]))
-        .style(transparent_button_style);
+    let version = text(i18n::tf("status.version", &[("version", env!("CARGO_PKG_VERSION"))]))
+        .color(theme::TEXT_MUTED).size(10);
 
-    let left = text(i18n::tf("status.version", &[("version", env!("CARGO_PKG_VERSION"))])).color(theme::TEXT_MUTED).size(12);
-
-    let right = if let Some(idx) = state.active_tab {
+    // Active session info
+    let session_text = if let Some(idx) = state.active_tab {
         if let Some(tab) = state.tabs.get(idx) {
-            text(&tab.title).color(theme::TEXT_SECONDARY).size(12)
+            text(&tab.title).color(theme::TEXT_SECONDARY).size(10)
         } else {
-            text("").size(12)
+            text("").size(10)
         }
     } else {
-        text(i18n::t("status.no_session")).color(theme::TEXT_MUTED).size(12)
+        text(i18n::t("status.no_session")).color(theme::TEXT_MUTED).size(10)
     };
 
-    // Settings gear button
-    let settings_btn = button(text("[=]").font(Font::MONOSPACE).color(theme::TEXT_SECONDARY).size(11))
-        .on_press(Message::ShowSettings)
-        .padding(Padding::from([2, 6]))
-        .style(transparent_button_style);
+    // Tab count
+    let tab_count = text(format!("{}T", state.tabs.len()))
+        .font(Font::MONOSPACE).color(theme::TEXT_MUTED).size(9);
 
-    let bar = row![toggle_btn, left, horizontal_space(), right, settings_btn]
-        .spacing(8)
-        .padding(Padding::from([4, 12]))
+    // History count
+    let hist_count = text(format!("{}H", state.cmd_history.len()))
+        .font(Font::MONOSPACE).color(theme::TEXT_MUTED).size(9);
+
+    // Language toggle
+    let lang_label = if state.locale == "zh-CN" { "EN" } else { "CN" };
+    let lang_btn = button(text(lang_label).font(Font::MONOSPACE).color(theme::ACCENT).size(9))
+        .on_press(Message::ToggleLanguage)
+        .padding(Padding::from([1, 5]))
+        .style(|_: &Theme, status| {
+            let mut s = button::Style::default();
+            s.background = None;
+            s.border = iced::Border { color: theme::BORDER, width: 1.0, radius: 3.0.into() };
+            if let button::Status::Hovered = status {
+                s.background = Some(theme::BG_HOVER.into());
+            }
+            s
+        });
+
+    // Shortcuts hint
+    let shortcuts = text(i18n::t("status.shortcuts")).color(theme::TEXT_MUTED).size(9);
+
+    let bar = row![version, shortcuts, horizontal_space(), tab_count, hist_count, lang_btn, session_text]
+        .spacing(10)
+        .padding(Padding::from([3, 10]))
         .align_y(alignment::Vertical::Center);
 
     container(bar)
@@ -3923,9 +5570,13 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
 
     let auth_label = text(i18n::t("form.auth_type")).color(theme::TEXT_SECONDARY).size(12);
 
+    // Placeholder hint for secret fields during edit (empty = keep existing)
+    let is_editing = state.edit_id.is_some();
+    let secret_placeholder = if is_editing { i18n::t("form.keep_existing") } else { "" };
+
     let auth_fields: Element<'_, Message> = if state.form.auth_type == "key" {
         let key_label = text(i18n::t("form.key_path")).color(theme::TEXT_SECONDARY).size(12);
-        let key_input = text_input("", &state.form.private_key)
+        let key_input = text_input(secret_placeholder, &state.form.private_key)
             .on_input(Message::FormPrivateKeyChanged)
             .padding(8)
             .size(14);
@@ -3942,18 +5593,23 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
         .spacing(4)
         .into();
 
-        column![
-            key_field,
-            labeled_input(
-                &i18n::t("form.passphrase"),
-                &state.form.passphrase,
-                Message::FormPassphraseChanged
-            ),
-        ]
-        .spacing(12)
-        .into()
+        let pass_label = text(i18n::t("form.passphrase")).color(theme::TEXT_SECONDARY).size(12);
+        let pass_input = text_input(secret_placeholder, &state.form.passphrase)
+            .on_input(Message::FormPassphraseChanged)
+            .padding(8)
+            .size(14);
+
+        column![key_field, column![pass_label, pass_input].spacing(4)]
+            .spacing(12)
+            .into()
     } else {
-        labeled_input(&i18n::t("form.password"), &state.form.password, Message::FormPasswordChanged)
+        let pw_label = text(i18n::t("form.password")).color(theme::TEXT_SECONDARY).size(12);
+        let pw_input = text_input(secret_placeholder, &state.form.password)
+            .on_input(Message::FormPasswordChanged)
+            .secure(true)
+            .padding(8)
+            .size(14);
+        column![pw_label, pw_input].spacing(4).into()
     };
 
     let group_input: Element<'_, Message> = {
@@ -3965,6 +5621,31 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
             .size(14);
         column![label_text, input].spacing(4).into()
     };
+
+    // Proxy selection
+    let proxy_label = text(i18n::t("proxy.select")).color(theme::TEXT_SECONDARY).size(12);
+    let mut proxy_row = row![
+        button(
+            text(i18n::t("proxy.none"))
+                .color(if state.form.proxy_id.is_empty() { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED })
+                .size(11)
+        )
+        .on_press(Message::FormProxyChanged(String::new()))
+        .padding(Padding::from([4, 8]))
+        .style(if state.form.proxy_id.is_empty() { accent_button_style } else { transparent_button_style }),
+    ].spacing(4);
+    for p in &state.proxies {
+        let is_sel = state.form.proxy_id == p.id;
+        let label = format!("{} ({})", p.name, p.proxy_type);
+        let pid = p.id.clone();
+        proxy_row = proxy_row.push(
+            button(text(label).color(if is_sel { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED }).size(11))
+                .on_press(Message::FormProxyChanged(pid))
+                .padding(Padding::from([4, 8]))
+                .style(if is_sel { accent_button_style } else { transparent_button_style }),
+        );
+    }
+    let proxy_input: Element<'_, Message> = column![proxy_label, proxy_row].spacing(4).into();
 
     let error_text = if state.error_message.is_empty() {
         text("").size(1)
@@ -3994,6 +5675,7 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
         auth_row,
         auth_fields,
         group_input,
+        proxy_input,
         error_text,
         buttons,
     ]
@@ -4048,6 +5730,7 @@ struct TerminalView {
     grid: Arc<parking_lot::Mutex<TerminalGrid>>,
     selection_start: Option<(usize, usize)>,
     selection_end: Option<(usize, usize)>,
+    font_size: f32,
 }
 
 /// Persistent state for the terminal canvas. Created once by iced and reused
@@ -4102,11 +5785,23 @@ impl<Message> canvas::Program<Message> for TerminalView {
             state.last_generation.store(current_gen, Ordering::Relaxed);
         }
 
-        let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
-            let font_size: f32 = 14.0;
-            let cell_w = font_size * 0.6;
-            let cell_h = font_size * 1.5;
+        // Resize terminal grid to fit canvas bounds
+        let font_size: f32 = self.font_size;
+        let cell_w = font_size * 0.6;
+        let cell_h = font_size * 1.5;
+        let new_cols = ((bounds.width / cell_w).floor() as usize).max(2);
+        let new_rows = ((bounds.height / cell_h).floor() as usize).max(2);
+        let needs_resize = new_cols != grid.cols || new_rows != grid.rows;
+        drop(grid); // release lock
 
+        if needs_resize {
+            self.grid.lock().resize(new_cols, new_rows);
+            state.cache.clear(); // force redraw at new size
+        }
+
+        let grid = self.grid.lock();
+
+        let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
             // Background fill
             frame.fill_rectangle(Point::ORIGIN, bounds.size(), theme::BG_PRIMARY);
 
@@ -4312,14 +6007,13 @@ fn cell_color_to_iced(c: crate::terminal::Color) -> Color {
 
 /// Convert pixel position to terminal grid coordinates (col, row).
 /// The terminal canvas starts after the sidebar (280px) and tab bar (34px).
-fn pixel_to_grid(x: f32, y: f32) -> Option<(usize, usize)> {
-    let term_x = x - 280.0;  // sidebar width
-    let term_y = y - 34.0;   // tab bar height
+fn pixel_to_grid_with(x: f32, y: f32, sidebar_w: f32, top_offset: f32, font_size: f32) -> Option<(usize, usize)> {
+    let term_x = x - sidebar_w;
+    let term_y = y - top_offset;
     if term_x < 0.0 || term_y < 0.0 {
         return None;
     }
 
-    let font_size = 14.0_f32;
     let cell_w = font_size * 0.6;
     let cell_h = font_size * 1.5;
 
@@ -4533,6 +6227,153 @@ fn humanize_file_size(size_str: &str) -> String {
         }
         Err(_) => size_str.to_string(), // Already formatted or not a number
     }
+}
+
+/// Parse /proc-based process detail output into structured fields.
+fn parse_process_detail(pid: u32, output: &str) -> ProcessDetailInfo {
+    let mut fields = Vec::new();
+    let mut children = Vec::new();
+    let mut threads = Vec::new();
+    let mut net_conns = Vec::new();
+    let mut listen_ports = Vec::new();
+    let mut open_fds = Vec::new();
+
+    fields.push(("PID".into(), pid.to_string()));
+
+    // Output format: ___TAG___\nbody\n___TAG2___\nbody2\n...
+    // split("___") gives: ["", "TAG", "\nbody\n", "TAG2", "\nbody2\n", ...]
+    // Tags are at odd indices (1,3,5,...), bodies at even indices (2,4,6,...)
+    let sections: Vec<&str> = output.split("___").collect();
+    let mut i = 1; // start at first tag
+    while i + 1 < sections.len() {
+        let tag = sections[i].trim();
+        let body = sections.get(i + 1).map(|s| s.trim()).unwrap_or("");
+        i += 2;
+        match tag {
+            "STATUS" => {
+                for line in body.lines() {
+                    if let Some((key, val)) = line.split_once(':') {
+                        let key = key.trim();
+                        // Replace tabs with spaces for clean display
+                        let val: String = val.trim().chars()
+                            .map(|c| if c == '\t' { ' ' } else { c })
+                            .collect();
+                        let val = val.trim().to_string();
+                        match key {
+                            "Name" | "State" | "PPid" | "Threads" => {
+                                fields.push((key.into(), val));
+                            }
+                            "Uid" => {
+                                // "0  0  0  0" → take first value
+                                let first = val.split_whitespace().next().unwrap_or(&val);
+                                fields.push(("Uid".into(), first.to_string()));
+                            }
+                            "Gid" => {
+                                let first = val.split_whitespace().next().unwrap_or(&val);
+                                fields.push(("Gid".into(), first.to_string()));
+                            }
+                            "VmRSS" | "VmSize" | "VmPeak" | "VmSwap" => {
+                                fields.push((key.into(), val));
+                            }
+                            "voluntary_ctxt_switches" => {
+                                fields.push(("CtxSwitch(V)".into(), val));
+                            }
+                            "nonvoluntary_ctxt_switches" => {
+                                fields.push(("CtxSwitch(NV)".into(), val));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "CMDLINE" => {
+                if !body.is_empty() { fields.push(("Cmdline".into(), body.into())); }
+            }
+            "IO" => {
+                for line in body.lines() {
+                    if let Some((key, val)) = line.split_once(':') {
+                        let (k, v) = (key.trim(), val.trim());
+                        if let Ok(bytes) = v.parse::<u64>() {
+                            fields.push((k.into(), format_bytes(bytes)));
+                        }
+                    }
+                }
+            }
+            "CWD" => {
+                if !body.is_empty() { fields.push(("CWD".into(), body.into())); }
+            }
+            "EXE" => {
+                if !body.is_empty() { fields.push(("Executable".into(), body.into())); }
+            }
+            "FD_COUNT" => {
+                if !body.is_empty() { fields.push(("Open FDs".into(), body.into())); }
+            }
+            "OOM" => {
+                if !body.is_empty() { fields.push(("OOM Score".into(), body.into())); }
+            }
+            "PS" => {
+                let parts: Vec<&str> = body.split_whitespace().collect();
+                if parts.len() >= 8 {
+                    fields.push(("User".into(), parts[2].into()));
+                    fields.push(("Nice".into(), parts[3].into()));
+                    fields.push(("VSZ".into(), format!("{} KB", parts[4])));
+                    fields.push(("RSS".into(), format!("{} KB", parts[5])));
+                    fields.push(("Elapsed".into(), parts[6].into()));
+                    fields.push(("Stat".into(), parts[7].into()));
+                }
+            }
+            "CHILDREN" => {
+                for line in body.lines() {
+                    let l = line.trim();
+                    if !l.is_empty() { children.push(l.to_string()); }
+                }
+            }
+            "THREADS" => {
+                for line in body.lines() {
+                    let l = line.trim();
+                    if !l.is_empty() { threads.push(l.to_string()); }
+                }
+            }
+            "NET" => {
+                for line in body.lines() {
+                    let l = line.trim();
+                    if !l.is_empty() { net_conns.push(l.to_string()); }
+                }
+            }
+            "LISTEN" => {
+                for line in body.lines() {
+                    let l = line.trim();
+                    if !l.is_empty() { listen_ports.push(l.to_string()); }
+                }
+            }
+            "LIMITS" => {
+                for line in body.lines() {
+                    let l = line.trim();
+                    if l.is_empty() || l.starts_with("Limit") { continue; }
+                    // Format: "Max open files            1048576              1048576              files"
+                    // Clean up: replace multi-spaces/tabs → single space
+                    let clean: String = l.split_whitespace().collect::<Vec<&str>>().join(" ");
+                    if !clean.is_empty() {
+                        fields.push(("Limit".into(), clean));
+                    }
+                }
+            }
+            "FDS" => {
+                for line in body.lines() {
+                    let l = line.trim();
+                    if !l.is_empty() && !l.starts_with("total") {
+                        // Extract just the symlink target: "... -> /path"
+                        if let Some(pos) = l.find("->") {
+                            open_fds.push(l[pos+3..].trim().to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ProcessDetailInfo { pid, fields, children, threads, net_conns, listen_ports, open_fds }
 }
 
 fn truncate_str(s: &str, max_chars: usize) -> String {

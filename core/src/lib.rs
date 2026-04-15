@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod i18n;
+mod proxy;
 mod app;
 mod crypto;
 mod ssh;

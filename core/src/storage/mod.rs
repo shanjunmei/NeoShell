@@ -24,6 +24,8 @@ pub struct ConnectionConfig {
     pub group: String,
     #[serde(default)]
     pub color: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
 }
 
 /// Safe version without secrets - sent to frontend for listing
@@ -37,6 +39,8 @@ pub struct ConnectionInfo {
     pub auth_type: String,
     pub group: String,
     pub color: String,
+    #[serde(default)]
+    pub proxy_id: Option<String>,
 }
 
 impl From<&ConnectionConfig> for ConnectionInfo {
@@ -50,6 +54,7 @@ impl From<&ConnectionConfig> for ConnectionInfo {
             auth_type: c.auth_type.clone(),
             group: c.group.clone(),
             color: c.color.clone(),
+            proxy_id: c.proxy_id.clone(),
         }
     }
 }
