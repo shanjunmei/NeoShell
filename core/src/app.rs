@@ -5490,7 +5490,9 @@ fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
         });
 
     // Shortcuts hint
-    let shortcuts = text(i18n::t("status.shortcuts")).color(theme::TEXT_MUTED).size(9);
+    let mod_key = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+    let shortcuts_str = i18n::t("status.shortcuts").replace("{mod}", mod_key);
+    let shortcuts = text(shortcuts_str).color(theme::TEXT_MUTED).size(9);
 
     let bar = row![version, shortcuts, horizontal_space(), tab_count, hist_count, lang_btn, session_text]
         .spacing(10)

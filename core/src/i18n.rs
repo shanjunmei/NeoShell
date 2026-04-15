@@ -183,7 +183,7 @@ static EN: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("file.modified", "Modified");
     m.insert("file.send_prefix", "Send:");
     m.insert("settings.font_size", "Font Size");
-    m.insert("status.shortcuts", "Cmd+H:History  Cmd+T:Connect");
+    m.insert("status.shortcuts", "{mod}+H:History  {mod}+T:Connect");
     m.insert("welcome.select", "Select a connection from the sidebar to begin");
     m.insert("confirm.delete", "Delete \"{name}\"?");
     m
@@ -349,7 +349,7 @@ static ZH: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("file.modified", "修改时间");
     m.insert("file.send_prefix", "发送:");
     m.insert("settings.font_size", "字体大小");
-    m.insert("status.shortcuts", "Cmd+H:历史  Cmd+T:连接");
+    m.insert("status.shortcuts", "{mod}+H:历史  {mod}+T:连接");
     m.insert("welcome.select", "从左侧选择一个连接以开始");
     m.insert("confirm.delete", "确认删除 \"{name}\"?");
     m
