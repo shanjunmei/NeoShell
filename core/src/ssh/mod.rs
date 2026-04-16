@@ -11,59 +11,27 @@ use ssh2::{MethodType, Session};
 
 /// Configure SSH session with broad algorithm support for maximum server compatibility.
 /// Must be called BEFORE session.handshake().
+/// Enable ALL supported algorithms for maximum server compatibility.
+/// Queries libssh2 for every algorithm it knows, then sets them all as
+/// preferences in a sensible order (modern first, legacy last).
 fn configure_session_algorithms(session: &Session) {
-    // KEX: prefer modern curve25519, fallback to ECDH and classic DH
-    let _ = session.method_pref(MethodType::Kex, &[
-        "curve25519-sha256",
-        "curve25519-sha256@libssh.org",
-        "ecdh-sha2-nistp256",
-        "ecdh-sha2-nistp384",
-        "ecdh-sha2-nistp521",
-        "diffie-hellman-group-exchange-sha256",
-        "diffie-hellman-group16-sha512",
-        "diffie-hellman-group18-sha512",
-        "diffie-hellman-group14-sha256",
-        "diffie-hellman-group14-sha1",
-        "diffie-hellman-group-exchange-sha1",
-        "diffie-hellman-group1-sha1",
-    ].join(","));
-
-    // Host key types
-    let _ = session.method_pref(MethodType::HostKey, &[
-        "ssh-ed25519",
-        "ecdsa-sha2-nistp256",
-        "ecdsa-sha2-nistp384",
-        "ecdsa-sha2-nistp521",
-        "rsa-sha2-512",
-        "rsa-sha2-256",
-        "ssh-rsa",
-    ].join(","));
-
-    // Ciphers (client→server and server→client)
-    let ciphers = [
-        "aes256-gcm@openssh.com",
-        "chacha20-poly1305@openssh.com",
-        "aes128-gcm@openssh.com",
-        "aes256-ctr",
-        "aes192-ctr",
-        "aes128-ctr",
-        "aes256-cbc",
-        "aes192-cbc",
-        "aes128-cbc",
-    ].join(",");
-    let _ = session.method_pref(MethodType::CryptCs, &ciphers);
-    let _ = session.method_pref(MethodType::CryptSc, &ciphers);
-
-    // MACs
-    let macs = [
-        "hmac-sha2-256-etm@openssh.com",
-        "hmac-sha2-512-etm@openssh.com",
-        "hmac-sha2-256",
-        "hmac-sha2-512",
-        "hmac-sha1",
-    ].join(",");
-    let _ = session.method_pref(MethodType::MacCs, &macs);
-    let _ = session.method_pref(MethodType::MacSc, &macs);
+    for method in &[
+        MethodType::Kex,
+        MethodType::HostKey,
+        MethodType::CryptCs,
+        MethodType::CryptSc,
+        MethodType::MacCs,
+        MethodType::MacSc,
+    ] {
+        if let Ok(supported) = session.supported_algs(*method) {
+            if !supported.is_empty() {
+                let all = supported.join(",");
+                if let Err(e) = session.method_pref(*method, &all) {
+                    log::warn!("method_pref failed for {:?}: {}", *method as i32, e);
+                }
+            }
+        }
+    }
 }
 
 /// Commands sent from the UI to an SSH session.
@@ -323,11 +291,20 @@ impl SshManager {
         let mut session =
             Session::new().map_err(|e| format!("Failed to create SSH session: {}", e))?;
         session.set_tcp_stream(tcp);
-        session.set_timeout(15000); // 15s timeout for handshake + auth
+        session.set_timeout(15000);
         configure_session_algorithms(&session);
-        session
-            .handshake()
-            .map_err(|e| format!("SSH handshake failed: {}", e))?;
+        match session.handshake() {
+            Ok(()) => {}
+            Err(e) => {
+                // Log supported algorithms for debugging
+                let kex = session.supported_algs(MethodType::Kex).unwrap_or_default();
+                let hk = session.supported_algs(MethodType::HostKey).unwrap_or_default();
+                let cipher = session.supported_algs(MethodType::CryptCs).unwrap_or_default();
+                log::error!("Handshake failed: {}. Supported KEX: {:?}, HostKey: {:?}, Ciphers: {:?}", e, kex, hk, cipher);
+                return Err(format!("SSH handshake failed: {} (KEX: {}, HostKey: {}, Cipher: {})",
+                    e, kex.join(","), hk.join(","), cipher.join(",")));
+            }
+        }
 
         log::info!("SSH handshake OK to {}:{}, authenticating as {} ({})", host, port, username, auth_type);
 
