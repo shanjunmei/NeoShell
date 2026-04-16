@@ -1,6 +1,6 @@
 [package]
 name = "neoshell-core"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 description = "NeoShell core library — all application logic"
 
@@ -47,8 +47,10 @@ arboard = "3"
 ureq = { version = "~2", features = ["json"] }
 md-5 = "0.10"
 
-[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
+# Vendored OpenSSL on ALL platforms — ensures libssh2 gets full EC/curve25519 support
+[dependencies.openssl]
+version = "0.10"
+features = ["vendored"]
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

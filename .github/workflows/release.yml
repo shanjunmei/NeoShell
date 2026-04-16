@@ -41,16 +41,15 @@ jobs:
           restore-keys: macos-${{ matrix.arch }}-cargo-
 
       - name: Install dependencies
-        run: brew install libssh2 openssl@3
+        run: |
+          # Do NOT install system libssh2 — force source build via libssh2-sys
+          # to ensure full curve25519/ecdh/ed25519 algorithm support
+          brew install cmake
 
       - name: Build release
-        run: |
-          if [ -d "/opt/homebrew/opt/openssl@3" ]; then
-            export OPENSSL_DIR="/opt/homebrew/opt/openssl@3"
-          elif [ -d "/usr/local/opt/openssl@3" ]; then
-            export OPENSSL_DIR="/usr/local/opt/openssl@3"
-          fi
-          cargo build --release --workspace --target ${{ matrix.target }}
+        env:
+          OPENSSL_STATIC: "1"
+        run: cargo build --release --workspace --target ${{ matrix.target }}
 
       - name: Package DMG
         run: |
@@ -169,7 +168,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssh2-1-dev libssl-dev pkg-config \
+          # No libssh2-dev / libssl-dev — vendored OpenSSL builds from source
+          sudo apt-get install -y pkg-config cmake \
             libxkbcommon-dev libwayland-dev libvulkan-dev libfuse2
 
       - name: Build release
