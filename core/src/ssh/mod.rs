@@ -11,10 +11,28 @@ use ssh2::{MethodType, Session};
 
 /// Configure SSH session with broad algorithm support for maximum server compatibility.
 /// Must be called BEFORE session.handshake().
-/// Enable ALL supported algorithms for maximum server compatibility.
-/// Queries libssh2 for every algorithm it knows, then sets them all as
-/// preferences in a sensible order (modern first, legacy last).
+/// Rigorously configure session algorithms for maximum server compatibility.
+///
+/// Strategy:
+/// 1. Query libssh2 for all compiled-in algorithms (via supported_algs)
+/// 2. Filter out pseudo-algorithms that aren't real negotiable methods
+///    (ext-info-c/s, kex-strict-c-v00@openssh.com — these are extension
+///     markers handled internally by libssh2, not transport algorithms)
+/// 3. Keep libssh2's default order (modern → legacy)
+/// 4. Offer the entire filtered list to the server; server picks the first
+///    algorithm from our list that it also supports
+///
+/// The SSH protocol negotiation itself handles "automatic switching": the
+/// client sends ALL offered algorithms in one KEXINIT message, and the
+/// server responds with its choice. No per-attempt fallback loop is needed.
 fn configure_session_algorithms(session: &Session) {
+    // Pseudo-algorithms that must not appear in method_pref.
+    // These are SSH extension negotiation markers, not actual crypto methods.
+    let is_pseudo = |alg: &str| -> bool {
+        alg.starts_with("ext-info-")
+            || alg.starts_with("kex-strict-")
+    };
+
     for method in &[
         MethodType::Kex,
         MethodType::HostKey,
@@ -22,14 +40,29 @@ fn configure_session_algorithms(session: &Session) {
         MethodType::CryptSc,
         MethodType::MacCs,
         MethodType::MacSc,
+        MethodType::CompCs,
+        MethodType::CompSc,
     ] {
-        if let Ok(supported) = session.supported_algs(*method) {
-            if !supported.is_empty() {
-                let all = supported.join(",");
-                if let Err(e) = session.method_pref(*method, &all) {
-                    log::warn!("method_pref failed for {:?}: {}", *method as i32, e);
-                }
-            }
+        let supported = match session.supported_algs(*method) {
+            Ok(algs) => algs,
+            Err(_) => continue,
+        };
+
+        // Keep only real crypto algorithms, preserve libssh2's default order
+        let real: Vec<&str> = supported.iter()
+            .copied()
+            .filter(|a| !is_pseudo(a))
+            .collect();
+
+        if real.is_empty() {
+            continue;
+        }
+
+        let list = real.join(",");
+        if let Err(e) = session.method_pref(*method, &list) {
+            log::warn!("method_pref({:?}) failed with list={}: {}",
+                *method as i32, list, e);
+            // Don't abort — libssh2 defaults will be used for this method
         }
     }
 }
@@ -296,12 +329,26 @@ impl SshManager {
         match session.handshake() {
             Ok(()) => {}
             Err(e) => {
-                // Log full details for debugging, show short message to user
+                // Log full algorithm diagnostics to help debug negotiation failures
                 let kex = session.supported_algs(MethodType::Kex).unwrap_or_default();
                 let hk = session.supported_algs(MethodType::HostKey).unwrap_or_default();
                 let cipher = session.supported_algs(MethodType::CryptCs).unwrap_or_default();
-                log::error!("Handshake failed: {}. KEX: {:?}, HostKey: {:?}, Ciphers: {:?}", e, kex, hk, cipher);
-                return Err(format!("SSH handshake failed: {}", e));
+                let mac = session.supported_algs(MethodType::MacCs).unwrap_or_default();
+                log::error!(
+                    "Handshake failed: {}\n  Offered KEX: {}\n  Offered HostKey: {}\n  Offered Cipher: {}\n  Offered MAC: {}",
+                    e, kex.join(","), hk.join(","), cipher.join(","), mac.join(",")
+                );
+                let err_str = e.to_string();
+                let hint = if err_str.contains("exchange") || err_str.contains("kex") {
+                    " (no common KEX algorithm — check server sshd_config KexAlgorithms)"
+                } else if err_str.contains("host key") {
+                    " (no common host key algorithm)"
+                } else if err_str.contains("cipher") {
+                    " (no common cipher)"
+                } else {
+                    ""
+                };
+                return Err(format!("SSH handshake failed: {}{}", e, hint));
             }
         }
 

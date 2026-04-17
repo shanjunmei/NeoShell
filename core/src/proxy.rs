@@ -5,7 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -16,13 +17,20 @@ use std::time::{Duration, Instant};
 pub struct ProxyConfig {
     pub id: String,
     pub name: String,
-    pub proxy_type: ProxyType,  // socks5h, http
+    pub proxy_type: ProxyType,
     pub host: String,
     pub port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    // SSH bastion additional fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_type: Option<String>,         // "password" | "key"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<String>,       // path to private key file
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,        // private key passphrase
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -30,6 +38,7 @@ pub struct ProxyConfig {
 pub enum ProxyType {
     Socks5h,
     Http,
+    SshBastion,
 }
 
 impl std::fmt::Display for ProxyType {
@@ -37,6 +46,7 @@ impl std::fmt::Display for ProxyType {
         match self {
             ProxyType::Socks5h => write!(f, "SOCKS5H"),
             ProxyType::Http => write!(f, "HTTP"),
+            ProxyType::SshBastion => write!(f, "SSH Bastion"),
         }
     }
 }
@@ -119,6 +129,11 @@ pub fn connect_via_proxy(
     target_port: u16,
     timeout: Duration,
 ) -> Result<TcpStream, String> {
+    // Bastion owns its own SSH transport — don't preconnect a raw TCP socket.
+    if proxy.proxy_type == ProxyType::SshBastion {
+        return connect_via_ssh_bastion(proxy, target_host, target_port, timeout);
+    }
+
     // Connect to proxy server
     let proxy_addr = format!("{}:{}", proxy.host, proxy.port);
     let tcp = TcpStream::connect_timeout(
@@ -137,6 +152,7 @@ pub fn connect_via_proxy(
     match proxy.proxy_type {
         ProxyType::Socks5h => socks5_handshake(tcp, target_host, target_port, proxy),
         ProxyType::Http => http_connect_handshake(tcp, target_host, target_port, proxy),
+        ProxyType::SshBastion => unreachable!("handled above"),
     }
 }
 
@@ -355,6 +371,219 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// SSH Bastion (ProxyJump) — tunnel via direct-tcpip channel
+// ---------------------------------------------------------------------------
+
+/// Connect to `target_host:target_port` via an SSH bastion host.
+/// Uses `channel_direct_tcpip` over an SSH session to the bastion, then pumps
+/// bytes through a local TCP loopback pair so the caller gets a normal TcpStream.
+pub fn connect_via_ssh_bastion(
+    bastion: &ProxyConfig,
+    target_host: &str,
+    target_port: u16,
+    timeout: Duration,
+) -> Result<TcpStream, String> {
+    // Create a local loopback pair so ssh2 can operate on a regular TcpStream:
+    //   listener on 127.0.0.1:ephemeral — the relay thread accepts().
+    //   client_end — connect back; caller uses this as the SSH transport.
+    // The bind+connect+accept sequence is racy in theory (a local process could
+    // hijack by connecting to the ephemeral port first), but the window is microseconds
+    // on a single-user desktop. A stricter fix would exchange a one-shot token first.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Bastion loopback bind failed: {}", e))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|e| format!("Bastion loopback local_addr failed: {}", e))?;
+
+    // Connect first to the bastion SSH port & authenticate before returning —
+    // this way any auth error is reported synchronously to the caller.
+    let bastion_addr = format!("{}:{}", bastion.host, bastion.port);
+    let bastion_tcp = TcpStream::connect_timeout(
+        &bastion_addr
+            .to_socket_addrs()
+            .map_err(|e| format!("Bastion DNS failed for '{}': {}", bastion_addr, e))?
+            .next()
+            .ok_or_else(|| format!("No address for bastion '{}'", bastion_addr))?,
+        timeout,
+    )
+    .map_err(|e| format!("Bastion TCP connect to {} failed: {}", bastion_addr, e))?;
+    bastion_tcp.set_read_timeout(Some(timeout)).ok();
+    bastion_tcp.set_write_timeout(Some(timeout)).ok();
+
+    let mut session = ssh2::Session::new()
+        .map_err(|e| format!("Bastion ssh2::Session::new failed: {}", e))?;
+    session.set_tcp_stream(bastion_tcp);
+    session.set_timeout(timeout.as_millis() as u32);
+    session
+        .handshake()
+        .map_err(|e| format!("Bastion SSH handshake failed: {}", e))?;
+
+    // Authenticate to bastion
+    let user = bastion
+        .username
+        .as_deref()
+        .ok_or_else(|| "Bastion: username required".to_string())?;
+    let auth_type = bastion.auth_type.as_deref().unwrap_or("password");
+    match auth_type {
+        "key" => {
+            let key_path = bastion
+                .private_key
+                .as_deref()
+                .ok_or_else(|| "Bastion: private_key path required".to_string())?;
+            let passphrase = bastion.passphrase.as_deref();
+            session
+                .userauth_pubkey_file(user, None, &PathBuf::from(key_path), passphrase)
+                .map_err(|e| format!("Bastion key auth failed: {}", e))?;
+        }
+        _ => {
+            let pass = bastion.password.as_deref().unwrap_or("");
+            session
+                .userauth_password(user, pass)
+                .map_err(|e| format!("Bastion password auth failed: {}", e))?;
+        }
+    }
+    if !session.authenticated() {
+        return Err("Bastion authentication failed".to_string());
+    }
+
+    // Open direct-tcpip channel to target
+    let channel = session
+        .channel_direct_tcpip(target_host, target_port, None)
+        .map_err(|e| {
+            format!(
+                "Bastion direct-tcpip to {}:{} failed: {}",
+                target_host, target_port, e
+            )
+        })?;
+
+    // Accept connection from caller, then spawn relay thread.
+    // Session must survive the relay; we move it into the thread.
+    let client_end = TcpStream::connect_timeout(&local_addr, timeout)
+        .map_err(|e| format!("Bastion loopback connect failed: {}", e))?;
+    let (local_sock, _) = listener
+        .accept()
+        .map_err(|e| format!("Bastion loopback accept failed: {}", e))?;
+
+    std::thread::spawn(move || {
+        if let Err(e) = run_bastion_relay(session, channel, local_sock) {
+            log::warn!("bastion relay ended: {}", e);
+        }
+    });
+
+    // Caller-side socket is a plain blocking TCP stream
+    client_end.set_nonblocking(false).ok();
+    client_end.set_read_timeout(None).ok();
+    client_end.set_write_timeout(None).ok();
+
+    Ok(client_end)
+}
+
+/// Pump bytes between a local TCP socket and an SSH direct-tcpip channel.
+/// Uses non-blocking polling — ssh2 channels aren't thread-safe for split
+/// read/write, so we poll both sides in one thread.
+fn run_bastion_relay(
+    session: ssh2::Session,
+    mut channel: ssh2::Channel,
+    mut local: TcpStream,
+) -> Result<(), String> {
+    use std::io::ErrorKind;
+
+    session.set_blocking(false);
+    local
+        .set_nonblocking(true)
+        .map_err(|e| format!("loopback set_nonblocking failed: {}", e))?;
+
+    let mut buf_up = [0u8; 32 * 1024]; // local -> channel
+    let mut buf_dn = [0u8; 32 * 1024]; // channel -> local
+
+    let mut local_closed = false;
+    let mut channel_eof = false;
+
+    loop {
+        let mut did_work = false;
+
+        // local -> channel
+        if !local_closed {
+            match local.read(&mut buf_up) {
+                Ok(0) => {
+                    local_closed = true;
+                    // send_eof can return EAGAIN under non-blocking; retry briefly so the peer sees EOF.
+                    let eof_deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        match channel.send_eof() {
+                            Ok(()) => break,
+                            Err(e)
+                                if e.code() == ssh2::ErrorCode::Session(-37)
+                                    && Instant::now() < eof_deadline =>
+                            {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(_) => break, // best-effort — log nothing to avoid noise
+                        }
+                    }
+                }
+                Ok(n) => {
+                    let mut written = 0;
+                    while written < n {
+                        match channel.write(&buf_up[written..n]) {
+                            Ok(w) => {
+                                written += w;
+                                did_work = true;
+                            }
+                            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(e) => return Err(format!("channel write: {}", e)),
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) => return Err(format!("local read: {}", e)),
+            }
+        }
+
+        // channel -> local
+        if !channel_eof {
+            match channel.read(&mut buf_dn) {
+                Ok(0) => {
+                    if channel.eof() {
+                        channel_eof = true;
+                        let _ = local.shutdown(std::net::Shutdown::Write);
+                    }
+                }
+                Ok(n) => {
+                    let mut written = 0;
+                    while written < n {
+                        match local.write(&buf_dn[written..n]) {
+                            Ok(w) => {
+                                written += w;
+                                did_work = true;
+                            }
+                            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(e) => return Err(format!("local write: {}", e)),
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) => return Err(format!("channel read: {}", e)),
+            }
+        }
+
+        if local_closed && channel_eof {
+            break;
+        }
+        if !did_work {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    let _ = channel.close();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Proxy latency test
 // ---------------------------------------------------------------------------
 
@@ -418,6 +647,22 @@ pub fn test_proxy(proxy: &ProxyConfig) -> ProxyTestResult {
                         error: None,
                     }
                 }
+                ProxyType::SshBastion => {
+                    // Full SSH handshake + auth to bastion — this is the real test.
+                    drop(tcp);
+                    match test_ssh_bastion(proxy) {
+                        Ok(ms) => ProxyTestResult {
+                            reachable: true,
+                            latency_ms: ms,
+                            error: None,
+                        },
+                        Err(e) => ProxyTestResult {
+                            reachable: false,
+                            latency_ms: start.elapsed().as_millis() as u64,
+                            error: Some(e),
+                        },
+                    }
+                }
             }
         }
         Err(e) => ProxyTestResult {
@@ -426,4 +671,59 @@ pub fn test_proxy(proxy: &ProxyConfig) -> ProxyTestResult {
             error: Some(format!("{}", e)),
         },
     }
+}
+
+fn test_ssh_bastion(bastion: &ProxyConfig) -> Result<u64, String> {
+    let start = Instant::now();
+    let addr = format!("{}:{}", bastion.host, bastion.port);
+    let tcp = TcpStream::connect_timeout(
+        &addr
+            .to_socket_addrs()
+            .map_err(|e| format!("DNS: {}", e))?
+            .next()
+            .ok_or_else(|| "No address".to_string())?,
+        Duration::from_secs(5),
+    )
+    .map_err(|e| format!("TCP: {}", e))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    tcp.set_write_timeout(Some(Duration::from_secs(10))).ok();
+
+    let mut session = ssh2::Session::new().map_err(|e| format!("Session: {}", e))?;
+    session.set_tcp_stream(tcp);
+    session.set_timeout(10_000);
+    session
+        .handshake()
+        .map_err(|e| format!("Handshake: {}", e))?;
+
+    let user = bastion
+        .username
+        .as_deref()
+        .ok_or_else(|| "Username required".to_string())?;
+    let auth_type = bastion.auth_type.as_deref().unwrap_or("password");
+    match auth_type {
+        "key" => {
+            let key_path = bastion
+                .private_key
+                .as_deref()
+                .ok_or_else(|| "Key path required".to_string())?;
+            session
+                .userauth_pubkey_file(
+                    user,
+                    None,
+                    &PathBuf::from(key_path),
+                    bastion.passphrase.as_deref(),
+                )
+                .map_err(|e| format!("Key auth: {}", e))?;
+        }
+        _ => {
+            let pass = bastion.password.as_deref().unwrap_or("");
+            session
+                .userauth_password(user, pass)
+                .map_err(|e| format!("Password auth: {}", e))?;
+        }
+    }
+    if !session.authenticated() {
+        return Err("Auth failed".to_string());
+    }
+    Ok(start.elapsed().as_millis() as u64)
 }

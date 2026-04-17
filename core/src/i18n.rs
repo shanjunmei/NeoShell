@@ -160,6 +160,12 @@ static EN: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("proxy.testing", "...");
     m.insert("proxy.none", "Direct (no proxy)");
     m.insert("proxy.select", "Proxy");
+    m.insert("proxy.type.bastion", "SSH Bastion");
+    m.insert("proxy.bastion.auth_password", "Password");
+    m.insert("proxy.bastion.auth_key", "Private Key");
+    m.insert("proxy.bastion.key_path", "Private key path");
+    m.insert("proxy.bastion.browse", "Browse");
+    m.insert("proxy.bastion.passphrase", "Key passphrase (optional)");
     // UI elements
     m.insert("btn.close", "x");
     m.insert("btn.refresh", "R");
@@ -326,6 +332,12 @@ static ZH: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("proxy.testing", "...");
     m.insert("proxy.none", "直连 (无代理)");
     m.insert("proxy.select", "代理");
+    m.insert("proxy.type.bastion", "SSH 堡垒机");
+    m.insert("proxy.bastion.auth_password", "密码认证");
+    m.insert("proxy.bastion.auth_key", "密钥认证");
+    m.insert("proxy.bastion.key_path", "私钥文件路径");
+    m.insert("proxy.bastion.browse", "浏览");
+    m.insert("proxy.bastion.passphrase", "密钥口令 (可选)");
     // 界面元素
     m.insert("btn.close", "关闭");
     m.insert("btn.refresh", "刷新");

@@ -350,11 +350,15 @@ enum BottomTab {
 #[derive(Default, Clone)]
 struct ProxyFormData {
     name: String,
-    proxy_type: String, // "socks5h" or "http"
+    proxy_type: String, // "socks5h" | "http" | "bastion"
     host: String,
     port: String,
     username: String,
     password: String,
+    // SSH bastion fields
+    auth_type: String,   // "password" | "key"
+    private_key: String, // file path
+    passphrase: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +528,10 @@ pub enum Message {
     ProxyFormPortChanged(String),
     ProxyFormUsernameChanged(String),
     ProxyFormPasswordChanged(String),
+    ProxyFormAuthTypeChanged(String),
+    ProxyFormPrivateKeyChanged(String),
+    ProxyFormPassphraseChanged(String),
+    ProxyFormBrowsePrivateKey,
     SaveProxy,
     DeleteProxy(String),
     TestProxy(String),
@@ -2396,11 +2404,15 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                         proxy_type: match p.proxy_type {
                             crate::proxy::ProxyType::Socks5h => "socks5h".into(),
                             crate::proxy::ProxyType::Http => "http".into(),
+                            crate::proxy::ProxyType::SshBastion => "bastion".into(),
                         },
                         host: p.host.clone(),
                         port: p.port.to_string(),
                         username: p.username.clone().unwrap_or_default(),
                         password: p.password.clone().unwrap_or_default(),
+                        auth_type: p.auth_type.clone().unwrap_or_else(|| "password".into()),
+                        private_key: p.private_key.clone().unwrap_or_default(),
+                        passphrase: p.passphrase.clone().unwrap_or_default(),
                     };
                 }
             } else {
@@ -2425,13 +2437,31 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         Message::ProxyFormPortChanged(v) => { state.proxy_form.port = v; Task::none() }
         Message::ProxyFormUsernameChanged(v) => { state.proxy_form.username = v; Task::none() }
         Message::ProxyFormPasswordChanged(v) => { state.proxy_form.password = v; Task::none() }
+        Message::ProxyFormAuthTypeChanged(v) => { state.proxy_form.auth_type = v; Task::none() }
+        Message::ProxyFormPrivateKeyChanged(v) => { state.proxy_form.private_key = v; Task::none() }
+        Message::ProxyFormPassphraseChanged(v) => { state.proxy_form.passphrase = v; Task::none() }
+        Message::ProxyFormBrowsePrivateKey => {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Select Private Key")
+                .pick_file()
+            {
+                state.proxy_form.private_key = path.to_string_lossy().to_string();
+            }
+            Task::none()
+        }
         Message::SaveProxy => {
-            let ptype = if state.proxy_form.proxy_type == "http" {
-                crate::proxy::ProxyType::Http
-            } else {
-                crate::proxy::ProxyType::Socks5h
+            let ptype = match state.proxy_form.proxy_type.as_str() {
+                "http" => crate::proxy::ProxyType::Http,
+                "bastion" => crate::proxy::ProxyType::SshBastion,
+                _ => crate::proxy::ProxyType::Socks5h,
             };
-            let port: u16 = state.proxy_form.port.parse().unwrap_or(1080);
+            let default_port: u16 = match ptype {
+                crate::proxy::ProxyType::Http => 8080,
+                crate::proxy::ProxyType::SshBastion => 22,
+                _ => 1080,
+            };
+            let port: u16 = state.proxy_form.port.parse().unwrap_or(default_port);
+            let is_bastion = matches!(ptype, crate::proxy::ProxyType::SshBastion);
             let proxy = crate::proxy::ProxyConfig {
                 id: state.proxy_edit_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 name: state.proxy_form.name.clone(),
@@ -2440,6 +2470,9 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                 port,
                 username: if state.proxy_form.username.is_empty() { None } else { Some(state.proxy_form.username.clone()) },
                 password: if state.proxy_form.password.is_empty() { None } else { Some(state.proxy_form.password.clone()) },
+                auth_type: if is_bastion { Some(state.proxy_form.auth_type.clone()) } else { None },
+                private_key: if is_bastion && !state.proxy_form.private_key.is_empty() { Some(state.proxy_form.private_key.clone()) } else { None },
+                passphrase: if is_bastion && !state.proxy_form.passphrase.is_empty() { Some(state.proxy_form.passphrase.clone()) } else { None },
             };
             if state.proxy_edit_id.is_some() {
                 state.proxy_store.update(&proxy);
@@ -5033,21 +5066,60 @@ fn view_proxy_manager(state: &NeoShell) -> Element<'_, Message> {
             text("HTTP").color(if state.proxy_form.proxy_type == "http" { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED }).size(11)
         ).on_press(Message::ProxyFormTypeChanged("http".into())).padding(Padding::from([4, 8]))
          .style(if state.proxy_form.proxy_type == "http" { accent_button_style } else { transparent_button_style });
+        let type_bastion = button(
+            text(i18n::t("proxy.type.bastion")).color(if state.proxy_form.proxy_type == "bastion" { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED }).size(11)
+        ).on_press(Message::ProxyFormTypeChanged("bastion".into())).padding(Padding::from([4, 8]))
+         .style(if state.proxy_form.proxy_type == "bastion" { accent_button_style } else { transparent_button_style });
 
         let save_btn = button(text(i18n::t("proxy.save")).color(theme::TEXT_PRIMARY).size(11))
             .on_press(Message::SaveProxy).padding(Padding::from([4, 12])).style(accent_button_style);
         let cancel_btn = button(text(i18n::t("proxy.cancel")).color(theme::TEXT_MUTED).size(11))
             .on_press(Message::HideProxyForm).padding(Padding::from([4, 8])).style(transparent_button_style);
 
-        let form_content = column![
+        let is_bastion = state.proxy_form.proxy_type == "bastion";
+        let mut form_content = column![
             text(form_title).color(theme::TEXT_PRIMARY).size(13),
             name_input,
-            row![type_socks, type_http].spacing(4),
+            row![type_socks, type_http, type_bastion].spacing(4),
             row![host_input, port_input].spacing(4),
             user_input,
-            pass_input,
-            row![cancel_btn, save_btn].spacing(8),
         ].spacing(6).padding(10).width(Fill);
+
+        if is_bastion {
+            let auth_pwd_btn = button(
+                text(i18n::t("proxy.bastion.auth_password"))
+                    .color(if state.proxy_form.auth_type == "password" || state.proxy_form.auth_type.is_empty() { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED })
+                    .size(11)
+            ).on_press(Message::ProxyFormAuthTypeChanged("password".into())).padding(Padding::from([4, 8]))
+             .style(if state.proxy_form.auth_type == "password" || state.proxy_form.auth_type.is_empty() { accent_button_style } else { transparent_button_style });
+            let auth_key_btn = button(
+                text(i18n::t("proxy.bastion.auth_key"))
+                    .color(if state.proxy_form.auth_type == "key" { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED })
+                    .size(11)
+            ).on_press(Message::ProxyFormAuthTypeChanged("key".into())).padding(Padding::from([4, 8]))
+             .style(if state.proxy_form.auth_type == "key" { accent_button_style } else { transparent_button_style });
+
+            form_content = form_content.push(row![auth_pwd_btn, auth_key_btn].spacing(4));
+
+            if state.proxy_form.auth_type == "key" {
+                let key_input = text_input(i18n::t("proxy.bastion.key_path"), &state.proxy_form.private_key)
+                    .on_input(Message::ProxyFormPrivateKeyChanged).padding(6).size(12);
+                let browse_btn = button(text(i18n::t("proxy.bastion.browse")).color(theme::ACCENT).size(11))
+                    .on_press(Message::ProxyFormBrowsePrivateKey).padding(Padding::from([4, 8]))
+                    .style(transparent_button_style);
+                let passphrase_input = text_input(i18n::t("proxy.bastion.passphrase"), &state.proxy_form.passphrase)
+                    .on_input(Message::ProxyFormPassphraseChanged).padding(6).size(12).secure(true);
+                form_content = form_content
+                    .push(row![key_input, browse_btn].spacing(4))
+                    .push(passphrase_input);
+            } else {
+                form_content = form_content.push(pass_input);
+            }
+        } else {
+            form_content = form_content.push(pass_input);
+        }
+
+        form_content = form_content.push(row![cancel_btn, save_btn].spacing(8));
 
         list_col = list_col.push(
             container(form_content).style(|_| container::Style {
