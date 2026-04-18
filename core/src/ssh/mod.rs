@@ -67,6 +67,64 @@ fn configure_session_algorithms(session: &Session) {
     }
 }
 
+/// Translate ssh2 / libssh2 / TCP error strings into user-friendly explanations.
+/// Returns the original message plus an i18n'd hint line when a known pattern is matched.
+pub fn translate_ssh_error(raw: &str) -> String {
+    let low = raw.to_ascii_lowercase();
+    let hint_key: Option<&'static str> = if low.contains("authentication failed")
+        || low.contains("auth failed")
+        || low.contains("password auth failed")
+        || low.contains("all authentication methods")
+    {
+        Some("ssh.err.auth")
+    } else if low.contains("connection refused") {
+        Some("ssh.err.refused")
+    } else if low.contains("timed out") || low.contains("timeout") {
+        Some("ssh.err.timeout")
+    } else if low.contains("no route to host") {
+        Some("ssh.err.no_route")
+    } else if low.contains("host key") && (low.contains("mismatch") || low.contains("changed") || low.contains("verification")) {
+        Some("ssh.err.host_key")
+    } else if low.contains("dns") || low.contains("name or service not known") || low.contains("no address") || low.contains("failed to lookup") {
+        Some("ssh.err.dns")
+    } else if low.contains("unable to exchange encryption keys")
+        || low.contains("kex")
+        || low.contains("key exchange")
+    {
+        Some("ssh.err.kex")
+    } else if low.contains("permission denied") {
+        Some("ssh.err.denied")
+    } else if low.contains("private key file not found") || low.contains("no such file") {
+        Some("ssh.err.key_missing")
+    } else if low.contains("invalid") && low.contains("key") {
+        Some("ssh.err.key_format")
+    } else if low.contains("broken pipe") || low.contains("connection reset") {
+        Some("ssh.err.reset")
+    } else {
+        None
+    };
+    match hint_key {
+        Some(k) => {
+            let hint = crate::i18n::t(k);
+            if hint.is_empty() || hint == k {
+                raw.to_string()
+            } else {
+                format!("{} — {}", raw, hint)
+            }
+        }
+        None => raw.to_string(),
+    }
+}
+
+/// Result of a lightweight SSH connection test (TCP + handshake + auth, no shell).
+#[derive(Debug, Clone)]
+pub struct ConnectionTestResult {
+    pub ok: bool,
+    pub latency_ms: u64,
+    pub stage: String,          // "tcp" | "handshake" | "auth" | "done"
+    pub error: Option<String>,  // friendly error when ok=false
+}
+
 /// Commands sent from the UI to an SSH session.
 pub enum SshCommand {
     Write(Vec<u8>),
@@ -262,6 +320,140 @@ impl SshManager {
         )
     }
 
+    /// Quickly verify a connection is reachable and authenticates.
+    /// No shell channel is opened — returns as soon as the session is authenticated.
+    /// Intended for a "Test" button in the connection form.
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_connection(
+        host: &str,
+        port: u16,
+        username: &str,
+        auth_type: &str,
+        password: Option<&str>,
+        private_key: Option<&str>,
+        passphrase: Option<&str>,
+        proxy_id: Option<&str>,
+    ) -> ConnectionTestResult {
+        use std::time::Instant;
+        let start = Instant::now();
+
+        let params = ConnectParams {
+            host: host.to_string(),
+            port,
+            username: username.to_string(),
+            auth_type: auth_type.to_string(),
+            password: password.map(|s| s.to_string()),
+            private_key: private_key.map(|s| s.to_string()),
+            passphrase: passphrase.map(|s| s.to_string()),
+            proxy_id: proxy_id.map(|s| s.to_string()),
+        };
+
+        // --- TCP ---
+        let tcp = match establish_tcp(&params) {
+            Ok(t) => t,
+            Err(e) => {
+                return ConnectionTestResult {
+                    ok: false,
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    stage: "tcp".into(),
+                    error: Some(translate_ssh_error(&e)),
+                };
+            }
+        };
+
+        // --- Handshake ---
+        let mut session = match Session::new() {
+            Ok(s) => s,
+            Err(e) => {
+                return ConnectionTestResult {
+                    ok: false,
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    stage: "handshake".into(),
+                    error: Some(format!("Session::new failed: {}", e)),
+                };
+            }
+        };
+        session.set_tcp_stream(tcp);
+        session.set_timeout(10_000);
+        configure_session_algorithms(&session);
+        if let Err(e) = session.handshake() {
+            return ConnectionTestResult {
+                ok: false,
+                latency_ms: start.elapsed().as_millis() as u64,
+                stage: "handshake".into(),
+                error: Some(translate_ssh_error(&e.to_string())),
+            };
+        }
+
+        // --- Authenticate ---
+        let auth_err = match auth_type {
+            "password" => {
+                let pw = match password {
+                    Some(p) => p,
+                    None => {
+                        return ConnectionTestResult {
+                            ok: false,
+                            latency_ms: start.elapsed().as_millis() as u64,
+                            stage: "auth".into(),
+                            error: Some("密码未填写".into()),
+                        };
+                    }
+                };
+                session.userauth_password(username, pw).err().map(|e| e.to_string())
+            }
+            "key" => {
+                let key_path_str = match private_key {
+                    Some(p) => p,
+                    None => {
+                        return ConnectionTestResult {
+                            ok: false,
+                            latency_ms: start.elapsed().as_millis() as u64,
+                            stage: "auth".into(),
+                            error: Some("私钥路径未填写".into()),
+                        };
+                    }
+                };
+                let key_path = std::path::Path::new(key_path_str);
+                if !key_path.exists() {
+                    return ConnectionTestResult {
+                        ok: false,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        stage: "auth".into(),
+                        error: Some(format!("私钥文件不存在: {}", key_path_str)),
+                    };
+                }
+                session
+                    .userauth_pubkey_file(username, None, key_path, passphrase)
+                    .err()
+                    .map(|e| e.to_string())
+            }
+            other => Some(format!("Unknown auth type: {}", other)),
+        };
+        if let Some(e) = auth_err {
+            return ConnectionTestResult {
+                ok: false,
+                latency_ms: start.elapsed().as_millis() as u64,
+                stage: "auth".into(),
+                error: Some(translate_ssh_error(&e)),
+            };
+        }
+        if !session.authenticated() {
+            return ConnectionTestResult {
+                ok: false,
+                latency_ms: start.elapsed().as_millis() as u64,
+                stage: "auth".into(),
+                error: Some(translate_ssh_error("Authentication failed")),
+            };
+        }
+
+        ConnectionTestResult {
+            ok: true,
+            latency_ms: start.elapsed().as_millis() as u64,
+            stage: "done".into(),
+            error: None,
+        }
+    }
+
     /// Connect using a ConnectionConfig (convenience wrapper).
     pub fn connect_config(
         &self,
@@ -338,17 +530,7 @@ impl SshManager {
                     "Handshake failed: {}\n  Offered KEX: {}\n  Offered HostKey: {}\n  Offered Cipher: {}\n  Offered MAC: {}",
                     e, kex.join(","), hk.join(","), cipher.join(","), mac.join(",")
                 );
-                let err_str = e.to_string();
-                let hint = if err_str.contains("exchange") || err_str.contains("kex") {
-                    " (no common KEX algorithm — check server sshd_config KexAlgorithms)"
-                } else if err_str.contains("host key") {
-                    " (no common host key algorithm)"
-                } else if err_str.contains("cipher") {
-                    " (no common cipher)"
-                } else {
-                    ""
-                };
-                return Err(format!("SSH handshake failed: {}{}", e, hint));
+                return Err(translate_ssh_error(&format!("SSH handshake failed: {}", e)));
             }
         }
 
@@ -360,7 +542,7 @@ impl SshManager {
                 let pw = password.ok_or("Password required for password auth")?;
                 session
                     .userauth_password(username, pw)
-                    .map_err(|e| format!("Password auth failed: {}", e))?;
+                    .map_err(|e| translate_ssh_error(&format!("Password auth failed: {}", e)))?;
             }
             "key" => {
                 let key_path_str =
@@ -1486,4 +1668,65 @@ fn parse_size_to_gb(s: &str) -> f64 {
 /// Escape a string for safe use in a shell command.
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::translate_ssh_error;
+
+    // Hints are i18n'd — tests check that the translator appends a hint (via " — ")
+    // for recognized patterns, without coupling to a specific locale's wording.
+
+    #[test]
+    fn auth_failure_gets_hint() {
+        let s = translate_ssh_error("Authentication failed");
+        assert!(s.contains(" — "), "expected hint appended, got: {}", s);
+        assert!(s.len() > "Authentication failed".len());
+    }
+
+    #[test]
+    fn connection_refused_gets_hint() {
+        let s = translate_ssh_error("TCP connect to 10.0.0.1:22 failed: Connection refused");
+        assert!(s.contains(" — "), "got: {}", s);
+    }
+
+    #[test]
+    fn timeout_gets_hint() {
+        let s = translate_ssh_error("TCP connect to 1.2.3.4:22 failed: operation timed out");
+        assert!(s.contains(" — "), "got: {}", s);
+    }
+
+    #[test]
+    fn host_key_mismatch_gets_hint() {
+        let s = translate_ssh_error("host key verification mismatch");
+        assert!(s.contains(" — "), "got: {}", s);
+    }
+
+    #[test]
+    fn dns_gets_hint() {
+        let s = translate_ssh_error("DNS resolve failed for 'bad.host': name or service not known");
+        assert!(s.contains(" — "), "got: {}", s);
+    }
+
+    #[test]
+    fn unknown_passes_through() {
+        let s = translate_ssh_error("something completely novel");
+        assert_eq!(s, "something completely novel");
+    }
+
+    #[test]
+    fn bogus_test_connection_returns_error() {
+        // Use an unroutable address to guarantee fast failure
+        let r = super::SshManager::test_connection(
+            "127.0.0.1",
+            1,            // port 1 — very unlikely to be open
+            "nobody",
+            "password",
+            Some("badpw"),
+            None, None, None,
+        );
+        assert!(!r.ok);
+        assert_eq!(r.stage, "tcp");
+        assert!(r.error.is_some());
+    }
 }

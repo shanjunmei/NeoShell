@@ -274,6 +274,11 @@ pub struct NeoShell {
     proxy_form: ProxyFormData,
     proxy_edit_id: Option<String>,
     proxy_test_results: HashMap<String, crate::proxy::ProxyTestResult>,
+    // Connection form test result & list test results
+    form_test_result: Option<crate::ssh::ConnectionTestResult>,
+    form_testing: bool,
+    conn_test_results: HashMap<String, crate::ssh::ConnectionTestResult>,
+    show_shortcuts_help: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -405,6 +410,12 @@ pub enum Message {
     FormPassphraseChanged(String),
     FormGroupChanged(String),
     SaveForm,
+    TestFormConnection,
+    TestFormConnectionDone(crate::ssh::ConnectionTestResult),
+    CloneConnection(String),
+    ToggleShortcutsHelp,
+    TestConnectionInList(String),
+    TestConnectionInListDone(String, crate::ssh::ConnectionTestResult),
 
     // Terminal
     SshConnected(String, String, String, String),  // tab_id, session_id, title, connection_id
@@ -736,6 +747,10 @@ impl Default for NeoShell {
             proxy_form: ProxyFormData::default(),
             proxy_edit_id: None,
             proxy_test_results: HashMap::new(),
+            form_test_result: None,
+            form_testing: false,
+            conn_test_results: HashMap::new(),
+            show_shortcuts_help: false,
         }
     }
 }
@@ -962,6 +977,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         }
         Message::ExecuteDelete => {
             if let Some((id, _)) = state.confirm_delete.take() {
+                state.conn_test_results.remove(&id);
                 let store = state.store.clone();
                 return Task::perform(
                     async move {
@@ -981,6 +997,8 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
         Message::ShowForm(maybe_id) => {
             state.show_form = true;
             state.show_connect_dialog = false;
+            state.form_test_result = None;
+            state.form_testing = false;
             if let Some(id) = maybe_id.clone() {
                 state.edit_id = Some(id.clone());
                 if let Some(info) = state.connections.iter().find(|c| c.id == id) {
@@ -1009,6 +1027,8 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             state.show_form = false;
             state.edit_id = None;
             state.form = ConnectionFormData::default();
+            state.form_test_result = None;
+            state.form_testing = false;
             Task::none()
         }
         Message::FormNameChanged(v) => {
@@ -1130,6 +1150,110 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                     Err(e) => Message::Error(e),
                 },
             )
+        }
+
+        Message::TestFormConnection => {
+            // Gather form values + preserved secrets (same logic as SaveForm)
+            let port: u16 = state.form.port.parse().unwrap_or(22);
+            let is_edit = state.edit_id.is_some();
+            let (preserved_pw, preserved_key, preserved_pass) = if let Some(ref id) = state.edit_id {
+                match state.store.get_connection(id) {
+                    Ok(existing) => (existing.password.clone(), existing.private_key.clone(), existing.passphrase.clone()),
+                    Err(_) => (None, None, None),
+                }
+            } else { (None, None, None) };
+
+            let password = if !state.form.password.is_empty() { Some(state.form.password.clone()) }
+                else if is_edit { preserved_pw } else { None };
+            let private_key = if !state.form.private_key.is_empty() { Some(state.form.private_key.clone()) }
+                else if is_edit { preserved_key } else { None };
+            let passphrase = if !state.form.passphrase.is_empty() { Some(state.form.passphrase.clone()) }
+                else if is_edit { preserved_pass } else { None };
+
+            let host = state.form.host.clone();
+            let username = state.form.username.clone();
+            let auth_type = state.form.auth_type.clone();
+            let proxy_id = if state.form.proxy_id.is_empty() { None } else { Some(state.form.proxy_id.clone()) };
+
+            state.form_testing = true;
+            state.form_test_result = None;
+
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        crate::ssh::SshManager::test_connection(
+                            &host, port, &username, &auth_type,
+                            password.as_deref(), private_key.as_deref(),
+                            passphrase.as_deref(), proxy_id.as_deref(),
+                        )
+                    }).await.unwrap_or(crate::ssh::ConnectionTestResult {
+                        ok: false, latency_ms: 0, stage: "internal".into(),
+                        error: Some("test task failed".into()),
+                    })
+                },
+                Message::TestFormConnectionDone,
+            )
+        }
+        Message::TestFormConnectionDone(result) => {
+            state.form_testing = false;
+            state.form_test_result = Some(result);
+            Task::none()
+        }
+        Message::CloneConnection(id) => {
+            if let Ok(src) = state.store.get_connection(&id) {
+                let mut clone = src.clone();
+                clone.id = uuid::Uuid::new_v4().to_string();
+                clone.name = format!("{} (Copy)", src.name);
+                let store = state.store.clone();
+                return Task::perform(
+                    async move {
+                        store.save_connection(clone)?;
+                        store.get_connections()
+                    },
+                    |r| match r {
+                        Ok(conns) => Message::ConnectionsLoaded(conns),
+                        Err(e) => Message::Error(e),
+                    },
+                );
+            }
+            Task::none()
+        }
+        Message::ToggleShortcutsHelp => {
+            state.show_shortcuts_help = !state.show_shortcuts_help;
+            Task::none()
+        }
+        Message::TestConnectionInList(id) => {
+            if let Ok(cfg) = state.store.get_connection(&id) {
+                let host = cfg.host.clone();
+                let port = cfg.port;
+                let username = cfg.username.clone();
+                let auth_type = cfg.auth_type.clone();
+                let password = cfg.password.clone();
+                let private_key = cfg.private_key.clone();
+                let passphrase = cfg.passphrase.clone();
+                let proxy_id = cfg.proxy_id.clone();
+                let id_clone = id.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::ssh::SshManager::test_connection(
+                                &host, port, &username, &auth_type,
+                                password.as_deref(), private_key.as_deref(),
+                                passphrase.as_deref(), proxy_id.as_deref(),
+                            )
+                        }).await.unwrap_or(crate::ssh::ConnectionTestResult {
+                            ok: false, latency_ms: 0, stage: "internal".into(),
+                            error: Some("test task failed".into()),
+                        })
+                    },
+                    move |r| Message::TestConnectionInListDone(id_clone.clone(), r),
+                );
+            }
+            Task::none()
+        }
+        Message::TestConnectionInListDone(id, result) => {
+            state.conn_test_results.insert(id, result);
+            Task::none()
         }
 
         // ---- terminal --------------------------------------------------------
@@ -1461,10 +1585,20 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                             state.history_filter.clear();
                             return Task::none();
                         }
+                        "/" | "?" => {
+                            state.show_shortcuts_help = !state.show_shortcuts_help;
+                            return Task::none();
+                        }
                         "+" | "=" | "-" | "0" => return Task::none(), // Block zoom
                         _ => {}
                     }
                 }
+                return Task::none();
+            }
+
+            // F1 toggles shortcut help (no modifier required)
+            if let keyboard::Key::Named(keyboard::key::Named::F1) = &key {
+                state.show_shortcuts_help = !state.show_shortcuts_help;
                 return Task::none();
             }
 
@@ -1481,6 +1615,10 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
 
             // ESC closes open dialogs
             if let keyboard::Key::Named(keyboard::key::Named::Escape) = &key {
+                if state.show_shortcuts_help {
+                    state.show_shortcuts_help = false;
+                    return Task::none();
+                }
                 if state.process_detail.is_some() {
                     state.process_detail = None;
                     return Task::none();
@@ -2947,6 +3085,18 @@ fn view_main(state: &NeoShell) -> Element<'_, Message> {
         .into();
     }
 
+    // Keyboard shortcuts help panel
+    if state.show_shortcuts_help {
+        let help_overlay = view_shortcuts_help();
+        return container(stack([
+            container(main_layout).width(Fill).height(Fill).into(),
+            help_overlay,
+        ]))
+        .width(Fill)
+        .height(Fill)
+        .into();
+    }
+
     // About dialog
     if state.show_about {
         let about_overlay = view_about_dialog(state);
@@ -3914,10 +4064,31 @@ fn view_sidebar(state: &NeoShell) -> Element<'_, Message> {
             let conn_id = conn.id.clone();
             let conn_id_edit = conn.id.clone();
             let conn_id_del = conn.id.clone();
+            let conn_id_test = conn.id.clone();
+            let conn_id_clone = conn.id.clone();
+
+            // Test result for this connection (if any)
+            let test_badge: Element<'_, Message> = if let Some(r) = state.conn_test_results.get(&conn.id) {
+                if r.ok {
+                    text(format!("{} ms", r.latency_ms)).color(theme::SUCCESS).size(9).into()
+                } else {
+                    text("!").color(theme::DANGER).size(9).into()
+                }
+            } else { Space::new(0, 0).into() };
 
             // Edit button (pencil)
             let edit_btn = button(text(i18n::t("btn.edit")).color(theme::TEXT_MUTED).size(9))
                 .on_press(Message::ShowForm(Some(conn_id_edit)))
+                .padding(Padding::from([2, 4]))
+                .style(transparent_button_style);
+
+            let test_btn = button(text(i18n::t("conn.test")).color(theme::ACCENT).size(9))
+                .on_press(Message::TestConnectionInList(conn_id_test))
+                .padding(Padding::from([2, 4]))
+                .style(transparent_button_style);
+
+            let clone_btn = button(text(i18n::t("conn.clone")).color(theme::TEXT_MUTED).size(9))
+                .on_press(Message::CloneConnection(conn_id_clone))
                 .padding(Padding::from([2, 4]))
                 .style(transparent_button_style);
 
@@ -3927,7 +4098,8 @@ fn view_sidebar(state: &NeoShell) -> Element<'_, Message> {
                 .style(transparent_button_style);
 
             let info_col = column![
-                row![status_dot, name_label, proxy_tag].spacing(4).align_y(alignment::Vertical::Center),
+                row![status_dot, name_label, proxy_tag, horizontal_space(), test_badge]
+                    .spacing(4).align_y(alignment::Vertical::Center),
                 host_label,
             ].spacing(2);
 
@@ -3937,7 +4109,7 @@ fn view_sidebar(state: &NeoShell) -> Element<'_, Message> {
                     .padding(Padding::from([6, 8]))
                     .width(Fill)
                     .style(sidebar_item_style),
-                column![edit_btn, del_btn].spacing(0),
+                column![row![test_btn, clone_btn].spacing(0), row![edit_btn, del_btn].spacing(0)].spacing(0),
             ]
             .spacing(0)
             .align_y(alignment::Vertical::Center);
@@ -5528,6 +5700,83 @@ fn view_about_dialog(_state: &NeoShell) -> Element<'static, Message> {
         .into()
 }
 
+// ---- Keyboard shortcuts help ----------------------------------------------
+
+fn view_shortcuts_help() -> Element<'static, Message> {
+    #[cfg(target_os = "macos")]
+    let mod_key = "Cmd";
+    #[cfg(not(target_os = "macos"))]
+    let mod_key = "Ctrl";
+
+    let shortcuts: &[(String, &'static str)] = &[
+        (format!("{}+T", mod_key), "open connection dialog"),
+        (format!("{}+W", mod_key), "close active tab"),
+        (format!("{}+1-9", mod_key), "switch to tab N"),
+        (format!("{}+V", mod_key), "paste clipboard into terminal"),
+        (format!("{}+C", mod_key), "copy selection"),
+        (format!("{}+H", mod_key), "open command history"),
+        (format!("{}+/", mod_key), "toggle this help panel"),
+        ("Ctrl+Tab".into(), "next tab"),
+        ("F1".into(), "toggle this help panel"),
+        ("Right-click".into(), "paste into terminal"),
+        ("Esc".into(), "close dialogs"),
+    ];
+
+    let title = text(i18n::t("shortcuts.title").to_string())
+        .size(20).color(theme::TEXT_PRIMARY);
+
+    let mut rows_col = column![].spacing(6);
+    for (key, desc) in shortcuts {
+        rows_col = rows_col.push(
+            row![
+                container(text(key.clone()).font(Font::MONOSPACE).color(theme::ACCENT).size(13))
+                    .width(140),
+                text(*desc).color(theme::TEXT_SECONDARY).size(13),
+            ].spacing(12).align_y(alignment::Vertical::Center)
+        );
+    }
+
+    let close_btn = button(
+        text(i18n::t("shortcuts.close").to_string()).color(theme::TEXT_SECONDARY).size(13)
+    )
+    .on_press(Message::ToggleShortcutsHelp)
+    .padding(Padding::from([6, 20]))
+    .style(transparent_button_style);
+
+    let content = column![
+        title,
+        vertical_space().height(12),
+        rows_col,
+        vertical_space().height(16),
+        close_btn,
+    ]
+    .align_x(alignment::Horizontal::Center)
+    .padding(28)
+    .width(460);
+
+    let card = container(content).style(|_| container::Style {
+        background: Some(theme::BG_SECONDARY.into()),
+        border: iced::Border { color: theme::BORDER, width: 1.0, radius: 12.0.into() },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 20.0,
+        },
+        ..Default::default()
+    });
+
+    container(card)
+        .width(Fill)
+        .height(Fill)
+        .center_x(Fill)
+        .center_y(Fill)
+        .style(|_| container::Style {
+            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.6).into()),
+            ..Default::default()
+        })
+        .into()
+}
+
 // ---- Status bar ------------------------------------------------------------
 
 fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
@@ -5573,7 +5822,21 @@ fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
     let shortcuts_str = i18n::t("status.shortcuts").replace("{mod}", mod_key);
     let shortcuts = text(shortcuts_str).color(theme::TEXT_MUTED).size(9);
 
-    let bar = row![version, shortcuts, horizontal_space(), tab_count, hist_count, lang_btn, session_text]
+    // "?" button — opens shortcuts help panel
+    let help_btn = button(text("?").font(Font::MONOSPACE).color(theme::ACCENT).size(10))
+        .on_press(Message::ToggleShortcutsHelp)
+        .padding(Padding::from([1, 5]))
+        .style(|_: &Theme, status| {
+            let mut s = button::Style::default();
+            s.background = None;
+            s.border = iced::Border { color: theme::BORDER, width: 1.0, radius: 3.0.into() };
+            if let button::Status::Hovered = status {
+                s.background = Some(theme::BG_HOVER.into());
+            }
+            s
+        });
+
+    let bar = row![version, shortcuts, horizontal_space(), tab_count, hist_count, help_btn, lang_btn, session_text]
         .spacing(10)
         .padding(Padding::from([3, 10]))
         .align_y(alignment::Vertical::Center);
@@ -5740,17 +6003,48 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
         text(short).color(theme::DANGER).size(11).into()
     };
 
+    // Test result row
+    let test_row: Element<'_, Message> = if state.form_testing {
+        text(i18n::t("form.testing")).color(theme::ACCENT).size(12).into()
+    } else if let Some(r) = &state.form_test_result {
+        if r.ok {
+            text(format!("{} {} ms", i18n::t("form.test_ok"), r.latency_ms))
+                .color(theme::SUCCESS).size(12).into()
+        } else {
+            let msg = r.error.clone().unwrap_or_else(|| "unknown".into());
+            column![
+                text(format!("{} [{}]", i18n::t("form.test_fail"), r.stage))
+                    .color(theme::DANGER).size(12),
+                text(msg).color(theme::TEXT_MUTED).size(11),
+            ].spacing(2).into()
+        }
+    } else { Space::new(0, 0).into() };
+
+    let test_btn: Element<'_, Message> = if state.form_testing {
+        button(text(i18n::t("form.testing")).color(theme::TEXT_MUTED).size(14))
+            .padding(Padding::from([8, 16]))
+            .style(transparent_button_style).into()
+    } else {
+        button(text(i18n::t("form.test")).color(theme::ACCENT).size(14))
+            .on_press(Message::TestFormConnection)
+            .padding(Padding::from([8, 16]))
+            .style(transparent_button_style).into()
+    };
+
     let buttons = row![
         button(text(i18n::t("form.cancel")).color(theme::TEXT_SECONDARY).size(14))
             .on_press(Message::HideForm)
             .padding(Padding::from([8, 20]))
             .style(transparent_button_style),
+        horizontal_space(),
+        test_btn,
         button(text(i18n::t("form.save")).color(theme::TEXT_PRIMARY).size(14))
             .on_press(Message::SaveForm)
             .padding(Padding::from([8, 20]))
             .style(accent_button_style),
     ]
-    .spacing(12);
+    .spacing(12)
+    .align_y(alignment::Vertical::Center);
 
     let form_content = column![
         title,
@@ -5766,9 +6060,10 @@ fn view_connection_form_overlay(state: &NeoShell) -> Element<'_, Message> {
     ]
     .spacing(12);
 
-    // Scrollable form + fixed bottom (error + buttons)
+    // Scrollable form + fixed bottom (test result + error + buttons)
     let form = column![
         scrollable(form_content).height(Fill),
+        test_row,
         error_row,
         buttons,
     ]

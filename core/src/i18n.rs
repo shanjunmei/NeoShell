@@ -91,7 +91,27 @@ static EN: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("form.group", "Group (optional)");
     m.insert("form.cancel", "Cancel");
     m.insert("form.save", "Save");
+    m.insert("form.test", "Test");
+    m.insert("form.testing", "Testing...");
+    m.insert("form.test_ok", "OK");
+    m.insert("form.test_fail", "Failed");
     m.insert("form.keep_existing", "(unchanged — leave empty to keep)");
+    m.insert("conn.clone", "Clone");
+    m.insert("conn.test", "Test");
+    m.insert("shortcuts.title", "Keyboard Shortcuts");
+    m.insert("shortcuts.close", "Close");
+    // SSH error hints
+    m.insert("ssh.err.auth", "wrong username/password or key — check credentials or server sshd permissions");
+    m.insert("ssh.err.refused", "target port closed — confirm SSH service is running on the right port (usually 22)");
+    m.insert("ssh.err.timeout", "no response — check network connectivity, IP/domain, or whether a proxy/bastion is required");
+    m.insert("ssh.err.no_route", "route unreachable — host may be offline or firewall is blocking inbound");
+    m.insert("ssh.err.host_key", "host key changed — server may have been reinstalled, or this could be a MitM attack");
+    m.insert("ssh.err.dns", "DNS resolve failed — check spelling or use an IP instead of a domain");
+    m.insert("ssh.err.kex", "no common KEX algorithm — server disabled modern KEX, ask admin to enable broader algorithms");
+    m.insert("ssh.err.denied", "permission denied — check username, key permissions (chmod 600), or authorized_keys");
+    m.insert("ssh.err.key_missing", "private key file not found — choose a valid key path");
+    m.insert("ssh.err.key_format", "invalid private key format — must be OpenSSH/PEM, PuTTY .ppk needs conversion");
+    m.insert("ssh.err.reset", "connection closed by peer — likely idle timeout or server-side disconnect");
     // File browser
     m.insert("filebrowser.upload", "^ Upload");
     m.insert("filebrowser.loading", "Loading files...");
@@ -272,7 +292,27 @@ static ZH: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("form.group", "分组 (可选)");
     m.insert("form.cancel", "取消");
     m.insert("form.save", "保存");
+    m.insert("form.test", "测试连接");
+    m.insert("form.testing", "测试中...");
+    m.insert("form.test_ok", "连接成功");
+    m.insert("form.test_fail", "连接失败");
     m.insert("form.keep_existing", "(未修改 — 留空保留原值)");
+    m.insert("conn.clone", "复制");
+    m.insert("conn.test", "测试");
+    m.insert("shortcuts.title", "键盘快捷键");
+    m.insert("shortcuts.close", "关闭");
+    // SSH 错误提示
+    m.insert("ssh.err.auth", "用户名或密码/密钥不正确 — 请检查账号凭据，或确认服务器 sshd 是否允许此用户登录");
+    m.insert("ssh.err.refused", "目标端口未开放 — 确认 SSH 服务已启动且端口号正确 (通常是 22)");
+    m.insert("ssh.err.timeout", "网络不通或主机无响应 — 检查 IP/域名、网络连通性，或是否需要走代理/堡垒机");
+    m.insert("ssh.err.no_route", "路由不可达 — 主机可能关机，或防火墙阻挡了入站连接");
+    m.insert("ssh.err.host_key", "主机密钥变化 — 可能是服务器重装，也可能遭遇中间人攻击，请向管理员确认");
+    m.insert("ssh.err.dns", "域名解析失败 — 检查域名拼写或改用 IP 地址");
+    m.insert("ssh.err.kex", "无公共密钥交换算法 — 服务器禁用了现代 KEX，请联系管理员开启兼容算法");
+    m.insert("ssh.err.denied", "认证被拒 — 检查用户名、密钥权限 (chmod 600)、或 authorized_keys 配置");
+    m.insert("ssh.err.key_missing", "私钥文件不存在 — 请重新选择正确的私钥文件路径");
+    m.insert("ssh.err.key_format", "私钥格式无效 — 确认是 OpenSSH/PEM 格式，PuTTY .ppk 需要先转换");
+    m.insert("ssh.err.reset", "连接被对端关闭 — 可能是空闲超时或服务器主动断开");
     m.insert("filebrowser.upload", "^ 上传");
     m.insert("filebrowser.loading", "正在加载文件...");
     m.insert("filedialog.upload", "选择要上传的文件");
