@@ -674,8 +674,21 @@ impl SshManager {
         };
 
         // --- Detect session persistence capability --------------------------
+        // tmux probing has side effects on non-mainstream SSH servers. Only
+        // probe when the banner identifies OpenSSH — embedded devices (Cisco,
+        // F5, SSHD_0.9.5, proprietary) go straight to RawShell to avoid the
+        // probe breaking the main session.
         let session_name = format!("neo-{}", &session_id[..8]);
-        let mode = detect_and_setup_session(&session, &session_name);
+        let banner = session.banner().unwrap_or("").to_ascii_lowercase();
+        let mode = if banner.contains("openssh") {
+            // Probe via exec_session — main session stays untouched either way.
+            let sess2 = exec_session.lock();
+            detect_and_setup_session(&sess2, &session_name)
+        } else {
+            log::info!("Non-OpenSSH banner ({:?}) — skipping tmux probe, using RawShell", banner);
+            SessionMode::RawShell
+        };
+        log::info!("Session mode: {:?}", mode);
 
         // --- Open channel, request PTY, start shell -------------------------
         let mut channel = session
