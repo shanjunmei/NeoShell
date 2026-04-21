@@ -1717,6 +1717,74 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Verify that libssh2 (as compiled on this platform) exposes the algorithms
+/// modern OpenSSH servers require. Called at startup so missing algorithms
+/// are surfaced early, and as a unit test so CI catches regressions on any
+/// platform build before shipping.
+pub fn verify_required_algorithms() -> Result<(), String> {
+    let sess = ssh2::Session::new().map_err(|e| format!("Session::new: {}", e))?;
+
+    // Required = algorithms that OpenSSH 8+ picks by default.
+    // Missing any of these means the client will fail to negotiate with modern servers.
+    let required_kex = &[
+        "curve25519-sha256",
+        "curve25519-sha256@libssh.org",
+        "ecdh-sha2-nistp256",
+        "diffie-hellman-group14-sha256",
+    ];
+    let required_hostkey = &[
+        "ssh-ed25519",
+        "ecdsa-sha2-nistp256",
+        "rsa-sha2-512",
+        "rsa-sha2-256",
+    ];
+    let required_cipher = &[
+        "chacha20-poly1305@openssh.com",
+        "aes256-gcm@openssh.com",
+        "aes256-ctr",
+    ];
+
+    let check = |method: ssh2::MethodType, required: &[&str], label: &str| -> Result<(), String> {
+        let supported = sess
+            .supported_algs(method)
+            .map_err(|e| format!("supported_algs({}): {}", label, e))?;
+        let missing: Vec<&str> = required
+            .iter()
+            .copied()
+            .filter(|a| !supported.contains(a))
+            .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "libssh2 missing required {} algorithms: {}. Available: {}",
+                label,
+                missing.join(","),
+                supported.join(",")
+            ))
+        }
+    };
+
+    check(ssh2::MethodType::Kex, required_kex, "KEX")?;
+    check(ssh2::MethodType::HostKey, required_hostkey, "HostKey")?;
+    check(ssh2::MethodType::CryptCs, required_cipher, "Cipher")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod algorithm_tests {
+    /// Guards against Windows builds that fall back to WinCNG (which lacks
+    /// curve25519/ed25519) or OpenSSL builds that strip EC support.
+    /// Runs in CI on every target; a failure blocks the release.
+    #[test]
+    fn required_algorithms_present() {
+        match super::verify_required_algorithms() {
+            Ok(()) => {}
+            Err(e) => panic!("{}", e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod error_tests {
     use super::translate_ssh_error;

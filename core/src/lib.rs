@@ -18,6 +18,12 @@ pub extern "C" fn neoshell_run() -> i32 {
     init_logger();
     log::info!("NeoShell {} starting; log file: {}",
         env!("CARGO_PKG_VERSION"), log_file_path().display());
+    // Verify libssh2 has modern algorithm support — log loudly if it doesn't.
+    // (CI tests catch this too, but a user-facing log line makes a bad build obvious.)
+    match ssh::verify_required_algorithms() {
+        Ok(()) => log::info!("libssh2 algorithm self-check: OK"),
+        Err(e) => log::error!("libssh2 algorithm self-check FAILED: {}", e),
+    }
     match app::run() {
         Ok(()) => 0,
         Err(_) => 1,

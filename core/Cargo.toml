@@ -1,6 +1,6 @@
 [package]
 name = "neoshell-core"
-version = "0.6.6"
+version = "0.6.7"
 edition = "2021"
 description = "NeoShell core library — all application logic"
 
@@ -17,8 +17,9 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 # Terminal emulation
 vte = "0.13"
 
-# SSH
-ssh2 = "0.9"
+# SSH — openssl-on-win32 forces OpenSSL backend on Windows (WinCNG lacks curve25519/ed25519);
+# vendored-openssl builds a consistent OpenSSL on every platform so algorithm support is uniform.
+ssh2 = { version = "0.9", features = ["openssl-on-win32", "vendored-openssl"] }
 
 # Crypto
 aes-gcm = "0.10"

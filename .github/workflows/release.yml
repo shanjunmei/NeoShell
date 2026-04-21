@@ -51,6 +51,11 @@ jobs:
           OPENSSL_STATIC: "1"
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
+      - name: Verify SSH algorithm support
+        env:
+          OPENSSL_STATIC: "1"
+        run: cargo test --release -p neoshell-core --target ${{ matrix.target }} algorithm_tests -- --nocapture
+
       - name: Package DMG
         run: |
           ARCH=${{ matrix.arch }}
@@ -175,6 +180,9 @@ jobs:
       - name: Build release
         run: cargo build --release --workspace
 
+      - name: Verify SSH algorithm support
+        run: cargo test --release -p neoshell-core algorithm_tests -- --nocapture
+
       - name: Verify GLIBC requirement
         run: |
           echo "=== GLIBC versions required ==="
@@ -266,6 +274,11 @@ jobs:
           OPENSSL_STATIC: "1"
         run: cargo build --release --workspace
 
+      - name: Verify SSH algorithm support
+        env:
+          OPENSSL_STATIC: "1"
+        run: cargo test --release -p neoshell-core algorithm_tests -- --nocapture
+
       - name: Package zip
         run: |
           $VERSION = "${{ github.ref_name }}".TrimStart("v")
@@ -322,6 +335,16 @@ jobs:
           $env:CFLAGS="-D_WIN32_WINNT=0x0601 -DNTDDI_VERSION=0x06010000"
           $env:CXXFLAGS="-D_WIN32_WINNT=0x0601 -DNTDDI_VERSION=0x06010000"
           cargo build --release --workspace
+
+      - name: Verify SSH algorithm support
+        env:
+          OPENSSL_STATIC: "1"
+          RUSTFLAGS: "-C target-feature=+crt-static --cfg windows7"
+          WINAPI_NO_BUNDLED_LIBRARIES: "1"
+        run: |
+          $env:CFLAGS="-D_WIN32_WINNT=0x0601 -DNTDDI_VERSION=0x06010000"
+          $env:CXXFLAGS="-D_WIN32_WINNT=0x0601 -DNTDDI_VERSION=0x06010000"
+          cargo test --release -p neoshell-core algorithm_tests -- --nocapture
 
       - name: Package zip
         run: |
