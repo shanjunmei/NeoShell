@@ -634,11 +634,12 @@ impl SshManager {
         }
 
         // --- Classify server — minimal SSH servers (MINA SSHD, embedded devices)
-        // can't handle the full feature set. Banner detection gates everything.
+        // skip the second SSH connection (concurrency-limited). Exec commands
+        // instead share the main session, serialized through the session mutex.
         let banner_lower = session.banner().unwrap_or("").to_ascii_lowercase();
         let minimal_mode = !banner_lower.contains("openssh");
         if minimal_mode {
-            log::info!("Minimal SSH mode (banner {:?}) — disabling keepalive, setenv, exec_session, monitoring", banner_lower);
+            log::info!("Minimal SSH mode (banner {:?}) — sharing main session for exec; disabling keepalive / setenv / exec-start", banner_lower);
         }
 
         // --- Enable SSH keepalive only for OpenSSH; minimal servers may interpret
@@ -652,8 +653,8 @@ impl SshManager {
 
         // --- Open a SECOND independent SSH connection for exec commands ----
         // Skipped in minimal mode: many embedded devices limit to 1 concurrent
-        // SSH session; a second connection causes both to disconnect.
-        let exec_session: Option<Arc<Mutex<Session>>> = if minimal_mode {
+        // SSH session. For those, we reuse the main session below (after wrap).
+        let separate_exec_session: Option<Arc<Mutex<Session>>> = if minimal_mode {
             None
         } else {
             let tcp2 = establish_tcp(&params)?;
@@ -697,7 +698,7 @@ impl SshManager {
         let session_name = format!("neo-{}", &session_id[..8]);
         let mode = if minimal_mode {
             SessionMode::RawShell
-        } else if let Some(ref es) = exec_session {
+        } else if let Some(ref es) = separate_exec_session {
             let sess2 = es.lock();
             detect_and_setup_session(&sess2, &session_name)
         } else {
@@ -776,6 +777,14 @@ impl SshManager {
         let session_writer = Arc::clone(&session);
         let session_reader = Arc::clone(&session);
 
+        // For minimal-mode servers we reuse the main session for exec too,
+        // with the session Mutex serializing all libssh2 access.
+        let exec_session: Option<Arc<Mutex<Session>>> = match separate_exec_session {
+            Some(es) => Some(es),
+            None if minimal_mode => Some(Arc::clone(&session)),
+            None => None,
+        };
+
         // Clone reconnection context for the reader thread.
         let reader_params = params.clone();
         let reader_mode = mode.clone();
@@ -788,7 +797,12 @@ impl SshManager {
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             'outer: loop {
+                // In minimal mode the exec path shares this session; acquire the
+                // session mutex so libssh2 access from reader and exec is
+                // serialized. For non-minimal, exec has its own session so this
+                // is an uncontended lock (cheap).
                 let result = {
+                    let _sess_guard = session_reader.lock();
                     let mut ch = channel_reader.lock();
                     ch.read(&mut buf)
                 };
@@ -891,12 +905,11 @@ impl SshManager {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         SshCommand::Write(data) => {
+                            // Hold session lock for the entire write so the
+                            // shell-reader and any exec_command run exclusively.
+                            let sess = session_writer.lock();
+                            sess.set_blocking(true);
                             let mut ch = channel_writer.lock();
-                            // Must set blocking for writes
-                            {
-                                let sess = session_writer.lock();
-                                sess.set_blocking(true);
-                            }
                             if let Err(e) = ch.write_all(&data) {
                                 let _ = event_tx_w.send(SshEvent::Error {
                                     session_id: sid_writer.clone(),
@@ -909,35 +922,24 @@ impl SshManager {
                                     error: format!("Flush error: {}", e),
                                 });
                             }
-                            // Back to non-blocking for the reader
-                            {
-                                let sess = session_writer.lock();
-                                sess.set_blocking(false);
-                            }
+                            sess.set_blocking(false);
                         }
                         SshCommand::Resize(cols, rows) => {
+                            let sess = session_writer.lock();
+                            sess.set_blocking(true);
                             let mut ch = channel_writer.lock();
-                            {
-                                let sess = session_writer.lock();
-                                sess.set_blocking(true);
-                            }
                             if let Err(e) = ch.request_pty_size(cols, rows, None, None) {
                                 let _ = event_tx_w.send(SshEvent::Error {
                                     session_id: sid_writer.clone(),
                                     error: format!("Resize error: {}", e),
                                 });
                             }
-                            {
-                                let sess = session_writer.lock();
-                                sess.set_blocking(false);
-                            }
+                            sess.set_blocking(false);
                         }
                         SshCommand::Disconnect => {
+                            let sess = session_writer.lock();
+                            sess.set_blocking(true);
                             let mut ch = channel_writer.lock();
-                            {
-                                let sess = session_writer.lock();
-                                sess.set_blocking(true);
-                            }
                             let _ = ch.send_eof();
                             let _ = ch.close();
                             break;
@@ -1028,36 +1030,53 @@ impl SshManager {
     }
 
     fn exec_command_inner(&self, session_id: &str, command: &str) -> Result<String, String> {
-        let exec_session = {
+        let (exec_session, minimal) = {
             let sessions = self.sessions.read();
             let s = sessions
                 .get(session_id)
                 .ok_or_else(|| format!("Session '{}' not found", session_id))?;
-            match &s.exec_session {
+            let es = match &s.exec_session {
                 Some(es) => es.clone(),
-                None => return Err("exec not supported on this server (minimal SSH mode)".into()),
-            }
+                None => return Err("exec not supported on this server".into()),
+            };
+            (es, s.minimal_mode)
         };
 
         let sess = exec_session.lock();
+        // When exec shares the main session (minimal mode), we must restore
+        // non-blocking mode afterwards so the shell reader keeps receiving
+        // WouldBlock on empty reads. For a separate session, this still works.
         sess.set_blocking(true);
 
-        let mut channel = sess
-            .channel_session()
-            .map_err(|e| format!("Failed to open exec channel: {}", e))?;
-        // Force UTF-8 locale for all exec commands
-        let utf8_cmd = format!("export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null; {}", command);
-        channel
-            .exec(&utf8_cmd)
-            .map_err(|e| format!("Failed to exec command: {}", e))?;
+        // Use a closure so blocking mode is restored even on error paths.
+        let result = (|| -> Result<String, String> {
+            // For minimal servers, skip the setenv-style locale prefix — some
+            // embedded devices don't implement `export` or `2>/dev/null`.
+            let utf8_cmd = if minimal {
+                command.to_string()
+            } else {
+                format!("export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null; {}", command)
+            };
 
-        let mut output = String::new();
-        channel
-            .read_to_string(&mut output)
-            .map_err(|e| format!("Failed to read command output: {}", e))?;
-        let _ = channel.wait_close();
+            let mut channel = sess
+                .channel_session()
+                .map_err(|e| format!("Failed to open exec channel: {}", e))?;
+            channel
+                .exec(&utf8_cmd)
+                .map_err(|e| format!("Failed to exec command: {}", e))?;
 
-        Ok(output)
+            let mut output = String::new();
+            channel
+                .read_to_string(&mut output)
+                .map_err(|e| format!("Failed to read command output: {}", e))?;
+            let _ = channel.wait_close();
+            Ok(output)
+        })();
+
+        // Critical for minimal mode: shell reader expects non-blocking reads.
+        sess.set_blocking(false);
+
+        result
     }
 
     /// Get the exec session Arc (with auto-reconnect on failure).
@@ -1095,18 +1114,24 @@ impl SshManager {
     }
 
     /// Rebuild the exec session by creating a fresh SSH connection.
-    /// No-op for minimal-mode sessions.
+    /// For minimal-mode sessions (where exec_session aliases the main session),
+    /// rebuild is a no-op — the main session reconnects on its own.
     fn rebuild_exec_session(&self, session_id: &str) -> Result<(), String> {
-        let (params, has_slot) = {
+        let (params, has_slot, minimal) = {
             let sessions = self.sessions.read();
             let s = sessions
                 .get(session_id)
                 .ok_or_else(|| format!("Session '{}' not found", session_id))?;
-            (s.params.clone(), s.exec_session.is_some())
+            (s.params.clone(), s.exec_session.is_some(), s.minimal_mode)
         };
 
         if !has_slot {
-            return Err("minimal SSH mode: no exec_session to rebuild".into());
+            return Err("no exec_session slot to rebuild".into());
+        }
+        if minimal {
+            // exec_session is the main session; main session reconnects in its
+            // own reader thread. Nothing to do here.
+            return Ok(());
         }
 
         let new_exec = create_exec_connection(&params)?;
