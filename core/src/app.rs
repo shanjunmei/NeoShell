@@ -279,6 +279,11 @@ pub struct NeoShell {
     form_testing: bool,
     conn_test_results: HashMap<String, crate::ssh::ConnectionTestResult>,
     show_shortcuts_help: bool,
+    // Error dialog (non-form failures — connection errors, etc.)
+    show_error_dialog: bool,
+    // Log viewer
+    show_log_viewer: bool,
+    log_viewer_content: String,
 }
 
 #[derive(Debug, Clone)]
@@ -416,6 +421,11 @@ pub enum Message {
     ToggleShortcutsHelp,
     TestConnectionInList(String),
     TestConnectionInListDone(String, crate::ssh::ConnectionTestResult),
+    DismissErrorDialog,
+    ShowLogViewer,
+    HideLogViewer,
+    RefreshLogViewer,
+    OpenLogFolder,
 
     // Terminal
     SshConnected(String, String, String, String),  // tab_id, session_id, title, connection_id
@@ -751,6 +761,9 @@ impl Default for NeoShell {
             form_testing: false,
             conn_test_results: HashMap::new(),
             show_shortcuts_help: false,
+            show_error_dialog: false,
+            show_log_viewer: false,
+            log_viewer_content: String::new(),
         }
     }
 }
@@ -892,18 +905,16 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             let store = state.store.clone();
             let ssh = state.ssh_manager.clone();
             let tab_id2 = tab_id.clone();
+            let conn_id_for_log = id.clone();
             Task::perform(
                 async move {
-                    use std::io::Write;
-                    let mut log = std::fs::OpenOptions::new().create(true).append(true)
-                        .open("/tmp/neoshell-connect.log").ok();
-                    macro_rules! dbg_log {
-                        ($($arg:tt)*) => { if let Some(ref mut f) = log { let _ = writeln!(f, $($arg)*); } }
-                    }
-
+                    log::info!("connect_to: attempting connection to id={}", conn_id_for_log);
                     // Run blocking SSH connect on dedicated thread
                     tokio::task::spawn_blocking(move || {
                         let config = store.get_connection(&id)?;
+                        log::info!("connect_to: resolved {}@{}:{} (auth={}, proxy={:?})",
+                            config.username, config.host, config.port,
+                            config.auth_type, config.proxy_id);
                         let session_id = ssh.connect_config(&config)?;
                         let title = format!("{}@{}:{}", config.username, config.host, config.port);
                         Ok((tab_id2, session_id, title, id))
@@ -913,14 +924,7 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                     Ok((tab_id, session_id, title, conn_id)) => {
                         Message::SshConnected(tab_id, session_id, title, conn_id)
                     }
-                    Err(e) => {
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                            .open("/tmp/neoshell-connect.log") {
-                            use std::io::Write;
-                            let _ = writeln!(f, "FAILED: {}", e);
-                        }
-                        Message::Error(e)
-                    }
+                    Err(e) => Message::Error(e),
                 },
             )
         }
@@ -1615,6 +1619,16 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
 
             // ESC closes open dialogs
             if let keyboard::Key::Named(keyboard::key::Named::Escape) = &key {
+                if state.show_error_dialog {
+                    state.show_error_dialog = false;
+                    state.error_message.clear();
+                    return Task::none();
+                }
+                if state.show_log_viewer {
+                    state.show_log_viewer = false;
+                    state.log_viewer_content.clear();
+                    return Task::none();
+                }
                 if state.show_shortcuts_help {
                     state.show_shortcuts_help = false;
                     return Task::none();
@@ -2688,8 +2702,55 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                 state.connecting_ids.remove(fid);
             }
             // Don't clear ALL connecting_ids — other connections may still be in flight
+            log::error!("{}", e);
             state.error_message = e;
+            state.show_error_dialog = true;
             state.transfer_progress = None;
+            Task::none()
+        }
+        Message::DismissErrorDialog => {
+            state.show_error_dialog = false;
+            state.error_message.clear();
+            Task::none()
+        }
+        Message::ShowLogViewer => {
+            // Load last ~200 KB of the log file
+            let path = crate::log_file_path();
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => {
+                    const MAX: usize = 200 * 1024;
+                    if c.len() > MAX {
+                        let start = c.len() - MAX;
+                        // align to a newline to avoid mid-line chop
+                        let aligned = c[start..].find('\n').map(|i| start + i + 1).unwrap_or(start);
+                        format!("…(showing last {} KB)…\n{}", (c.len() - aligned) / 1024, &c[aligned..])
+                    } else {
+                        c
+                    }
+                }
+                Err(e) => format!("<cannot read log file {}: {}>", path.display(), e),
+            };
+            state.log_viewer_content = content;
+            state.show_log_viewer = true;
+            Task::none()
+        }
+        Message::HideLogViewer => {
+            state.show_log_viewer = false;
+            state.log_viewer_content.clear();
+            Task::none()
+        }
+        Message::RefreshLogViewer => {
+            Task::done(Message::ShowLogViewer)
+        }
+        Message::OpenLogFolder => {
+            let path = crate::log_file_path();
+            let dir = path.parent().unwrap_or(std::path::Path::new("."));
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg(dir).spawn();
+            #[cfg(target_os = "windows")]
+            let _ = std::process::Command::new("explorer").arg(dir).spawn();
+            #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
             Task::none()
         }
     }
@@ -3091,6 +3152,30 @@ fn view_main(state: &NeoShell) -> Element<'_, Message> {
         return container(stack([
             container(main_layout).width(Fill).height(Fill).into(),
             help_overlay,
+        ]))
+        .width(Fill)
+        .height(Fill)
+        .into();
+    }
+
+    // Log viewer
+    if state.show_log_viewer {
+        let log_overlay = view_log_viewer(state);
+        return container(stack([
+            container(main_layout).width(Fill).height(Fill).into(),
+            log_overlay,
+        ]))
+        .width(Fill)
+        .height(Fill)
+        .into();
+    }
+
+    // Error dialog (full non-truncated error + "See log" action)
+    if state.show_error_dialog && !state.error_message.is_empty() {
+        let err_overlay = view_error_dialog(state);
+        return container(stack([
+            container(main_layout).width(Fill).height(Fill).into(),
+            err_overlay,
         ]))
         .width(Fill)
         .height(Fill)
@@ -5777,6 +5862,123 @@ fn view_shortcuts_help() -> Element<'static, Message> {
         .into()
 }
 
+// ---- Error dialog ----------------------------------------------------------
+
+fn view_error_dialog(state: &NeoShell) -> Element<'_, Message> {
+    let title = text(i18n::t("err.title")).size(16).color(theme::DANGER);
+
+    // Full error, wrapped; no truncation
+    let msg = text(state.error_message.clone()).size(13).color(theme::TEXT_PRIMARY);
+
+    let log_btn = button(text(i18n::t("err.view_log")).color(theme::ACCENT).size(12))
+        .on_press(Message::ShowLogViewer)
+        .padding(Padding::from([6, 14]))
+        .style(transparent_button_style);
+
+    let dismiss_btn = button(text(i18n::t("err.dismiss")).color(theme::TEXT_PRIMARY).size(12))
+        .on_press(Message::DismissErrorDialog)
+        .padding(Padding::from([6, 18]))
+        .style(accent_button_style);
+
+    let content = column![
+        title,
+        vertical_space().height(8),
+        scrollable(container(msg).padding(8)).height(180),
+        vertical_space().height(8),
+        row![log_btn, horizontal_space(), dismiss_btn]
+            .align_y(alignment::Vertical::Center),
+    ]
+    .spacing(4)
+    .padding(24)
+    .width(540);
+
+    let card = container(content).style(|_| container::Style {
+        background: Some(theme::BG_SECONDARY.into()),
+        border: iced::Border { color: theme::DANGER, width: 1.0, radius: 10.0.into() },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 20.0,
+        },
+        ..Default::default()
+    });
+
+    container(card)
+        .width(Fill).height(Fill)
+        .center_x(Fill).center_y(Fill)
+        .style(|_| container::Style {
+            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.6).into()),
+            ..Default::default()
+        })
+        .into()
+}
+
+// ---- Log viewer ------------------------------------------------------------
+
+fn view_log_viewer(state: &NeoShell) -> Element<'_, Message> {
+    let title = text(i18n::t("log.title")).size(18).color(theme::TEXT_PRIMARY);
+    let path_hint = {
+        let p = crate::log_file_path();
+        text(format!("{}", p.display())).color(theme::TEXT_MUTED).size(10)
+    };
+
+    let close_btn = button(text("x").font(Font::MONOSPACE).color(theme::TEXT_MUTED).size(13))
+        .on_press(Message::HideLogViewer)
+        .padding(Padding::from([2, 8]))
+        .style(transparent_button_style);
+
+    let refresh_btn = button(text(i18n::t("log.refresh")).color(theme::ACCENT).size(11))
+        .on_press(Message::RefreshLogViewer)
+        .padding(Padding::from([4, 10]))
+        .style(transparent_button_style);
+
+    let open_folder_btn = button(text(i18n::t("log.open_folder")).color(theme::ACCENT).size(11))
+        .on_press(Message::OpenLogFolder)
+        .padding(Padding::from([4, 10]))
+        .style(transparent_button_style);
+
+    let header = row![
+        title, horizontal_space(), refresh_btn, open_folder_btn, close_btn,
+    ].spacing(6).align_y(alignment::Vertical::Center);
+
+    // Render log content as monospace text, scrollable
+    let body = text(state.log_viewer_content.clone())
+        .font(Font::MONOSPACE)
+        .color(theme::TEXT_SECONDARY)
+        .size(11);
+
+    let content = column![
+        header,
+        path_hint,
+        vertical_space().height(8),
+        scrollable(container(body).padding(10).width(Fill)).height(Fill),
+    ]
+    .spacing(4)
+    .padding(20)
+    .width(780)
+    .height(520);
+
+    let card = container(content).style(|_| container::Style {
+        background: Some(theme::BG_SECONDARY.into()),
+        border: iced::Border { color: theme::BORDER, width: 1.0, radius: 10.0.into() },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 20.0,
+        },
+        ..Default::default()
+    });
+
+    container(card)
+        .width(Fill).height(Fill)
+        .center_x(Fill).center_y(Fill)
+        .style(|_| container::Style {
+            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+            ..Default::default()
+        })
+        .into()
+}
+
 // ---- Status bar ------------------------------------------------------------
 
 fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
@@ -5836,7 +6038,21 @@ fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
             s
         });
 
-    let bar = row![version, shortcuts, horizontal_space(), tab_count, hist_count, help_btn, lang_btn, session_text]
+    // "LOG" button — opens log viewer
+    let log_btn = button(text(i18n::t("status.log")).font(Font::MONOSPACE).color(theme::ACCENT).size(9))
+        .on_press(Message::ShowLogViewer)
+        .padding(Padding::from([1, 5]))
+        .style(|_: &Theme, status| {
+            let mut s = button::Style::default();
+            s.background = None;
+            s.border = iced::Border { color: theme::BORDER, width: 1.0, radius: 3.0.into() };
+            if let button::Status::Hovered = status {
+                s.background = Some(theme::BG_HOVER.into());
+            }
+            s
+        });
+
+    let bar = row![version, shortcuts, horizontal_space(), tab_count, hist_count, log_btn, help_btn, lang_btn, session_text]
         .spacing(10)
         .padding(Padding::from([3, 10]))
         .align_y(alignment::Vertical::Center);
