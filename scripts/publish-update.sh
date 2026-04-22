@@ -15,7 +15,7 @@
 set -e
 
 REPO="uk0/NeoShell"
-SERVER="root@dpnet1"
+SERVER="root@bwg1"
 SERVER_PATH="/var/www/neoshell/updates"
 UPDATE_URL="https://neoshell.wwwneo.com/updates"
 WORK_DIR="/tmp/neoshell-update-publish"
