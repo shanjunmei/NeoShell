@@ -433,6 +433,9 @@ pub enum Message {
     HideLogViewer,
     RefreshLogViewer,
     OpenLogFolder,
+    // Window lifecycle — close button minimizes to taskbar/dock instead of exiting
+    WindowCloseRequested(iced::window::Id),
+    QuitApp,
 
     // Terminal
     SshConnected(String, String, String, String),  // tab_id, session_id, title, connection_id
@@ -1613,6 +1616,10 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
                             state.show_shortcuts_help = !state.show_shortcuts_help;
                             return Task::none();
                         }
+                        // Cmd/Ctrl + Shift + Q → true quit (bypasses close-to-taskbar)
+                        "q" | "Q" if modifiers.shift() => {
+                            return Task::done(Message::QuitApp);
+                        }
                         "+" | "=" | "-" | "0" => return Task::none(), // Block zoom
                         _ => {}
                     }
@@ -2773,6 +2780,22 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
             Task::none()
         }
+        Message::WindowCloseRequested(id) => {
+            // Intercept × button — minimize so SSH sessions survive. Use
+            // Cmd/Ctrl+Shift+Q (or status bar QUIT button) for real exit.
+            log::info!("Window close requested — minimizing to taskbar (sessions preserved)");
+            let t: Task<Message> = iced::window::minimize(id, true);
+            t
+        }
+        Message::QuitApp => {
+            log::info!("User requested quit — closing all SSH sessions");
+            for sid in state.ssh_manager.active_sessions() {
+                let _ = state.ssh_manager.disconnect(&sid);
+            }
+            let t: Task<Message> = iced::window::get_latest()
+                .and_then(|id| iced::window::close(id));
+            t
+        }
     }
 }
 
@@ -2785,6 +2808,15 @@ fn subscription(state: &NeoShell) -> Subscription<Message> {
         time::every(Duration::from_millis(50)).map(|_| Message::PollSshEvents),
         // Check for updates every hour
         time::every(Duration::from_secs(3600)).map(|_| Message::CheckForUpdate),
+        // Always-on listener for CloseRequested — the × button is intercepted
+        // and converted to a minimize so SSH sessions survive. Cmd/Ctrl+Shift+Q
+        // is the explicit quit shortcut.
+        event::listen_with(|evt, _status, window| match evt {
+            iced::Event::Window(iced::window::Event::CloseRequested) => {
+                Some(Message::WindowCloseRequested(window))
+            }
+            _ => None,
+        }),
     ];
 
     // Monitor refresh every 3 seconds when there is an active tab
@@ -5821,6 +5853,7 @@ fn view_shortcuts_help() -> Element<'static, Message> {
         (format!("{}+C", mod_key), "copy selection"),
         (format!("{}+H", mod_key), "open command history"),
         (format!("{}+/", mod_key), "toggle this help panel"),
+        (format!("{}+Shift+Q", mod_key), "quit application (close × only minimizes)"),
         ("Ctrl+Tab".into(), "next tab"),
         ("F1".into(), "toggle this help panel"),
         ("Right-click".into(), "paste into terminal"),
@@ -6072,7 +6105,22 @@ fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
             s
         });
 
-    let bar = row![version, shortcuts, horizontal_space(), tab_count, hist_count, log_btn, help_btn, lang_btn, session_text]
+    // Explicit Quit — close (×) button minimizes to keep SSH sessions alive;
+    // this is how users truly exit the process.
+    let quit_btn = button(text(i18n::t("status.quit")).font(Font::MONOSPACE).color(theme::DANGER).size(9))
+        .on_press(Message::QuitApp)
+        .padding(Padding::from([1, 6]))
+        .style(|_: &Theme, status| {
+            let mut s = button::Style::default();
+            s.background = None;
+            s.border = iced::Border { color: theme::DANGER, width: 1.0, radius: 3.0.into() };
+            if let button::Status::Hovered = status {
+                s.background = Some(Color::from_rgba(1.0, 0.3, 0.3, 0.15).into());
+            }
+            s
+        });
+
+    let bar = row![version, shortcuts, horizontal_space(), tab_count, hist_count, log_btn, help_btn, lang_btn, quit_btn, session_text]
         .spacing(10)
         .padding(Padding::from([3, 10]))
         .align_y(alignment::Vertical::Center);

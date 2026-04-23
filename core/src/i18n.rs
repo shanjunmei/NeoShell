@@ -107,6 +107,7 @@ static EN: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("log.refresh", "Refresh");
     m.insert("log.open_folder", "Open Folder");
     m.insert("status.log", "LOG");
+    m.insert("status.quit", "QUIT");
     // SSH error hints
     m.insert("ssh.err.auth", "wrong username/password or key — check credentials or server sshd permissions");
     m.insert("ssh.err.refused", "target port closed — confirm SSH service is running on the right port (usually 22)");
@@ -315,6 +316,7 @@ static ZH: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("log.refresh", "刷新");
     m.insert("log.open_folder", "打开目录");
     m.insert("status.log", "日志");
+    m.insert("status.quit", "退出");
     // SSH 错误提示
     m.insert("ssh.err.auth", "用户名或密码/密钥不正确 — 请检查账号凭据，或确认服务器 sshd 是否允许此用户登录");
     m.insert("ssh.err.refused", "目标端口未开放 — 确认 SSH 服务已启动且端口号正确 (通常是 22)");
