@@ -20,17 +20,24 @@ use crate::i18n;
 use crate::ui::theme;
 use crate::updater::Updater;
 
-/// Primary UI font. cosmic-text (under iced) does glyph-level fallback to
-/// system fonts when the primary doesn't cover a codepoint, so CJK characters
-/// render via the system CJK font even though we specify a Latin-first family.
-///
-/// Windows 11 detail: "Microsoft YaHei" is usually installed but the family
-/// name registered with fontdb varies between Win10/11 and some installs have
-/// a malformed mstmc.ttf that breaks font enumeration mid-way. "Segoe UI" is
-/// the Win10/11 default UI font and is guaranteed to load; CJK codepoints
-/// fall back to YaHei/SimSun/etc. automatically.
-#[cfg(target_os = "macos")]
+/// CJK font used by the terminal canvas for wide characters. Always points
+/// at the embedded NotoSansSC-Min.ttf (family "Noto Sans CJK SC") — canvas
+/// text rendering via Family::Name doesn't do reliable glyph-level fallback,
+/// so CJK MUST resolve to a family that actually contains Han ideographs.
+/// Our embedded subset guarantees this across macOS / Windows 10/11 / Linux
+/// regardless of which system CJK fonts happen to be installed.
 const CJK_FONT: Font = Font {
+    family: iced::font::Family::Name("Noto Sans CJK SC"),
+    weight: iced::font::Weight::Normal,
+    stretch: iced::font::Stretch::Normal,
+    style: iced::font::Style::Normal,
+};
+
+/// Primary UI font — used as iced's default_font. Text-widget rendering does
+/// glyph-level fallback, so a Latin-first family renders CJK via the embedded
+/// NotoSansSC-Min.ttf fallback; the UI keeps a native per-platform look.
+#[cfg(target_os = "macos")]
+const UI_FONT: Font = Font {
     family: iced::font::Family::Name("PingFang SC"),
     weight: iced::font::Weight::Normal,
     stretch: iced::font::Stretch::Normal,
@@ -38,7 +45,7 @@ const CJK_FONT: Font = Font {
 };
 
 #[cfg(target_os = "windows")]
-const CJK_FONT: Font = Font {
+const UI_FONT: Font = Font {
     family: iced::font::Family::Name("Segoe UI"),
     weight: iced::font::Weight::Normal,
     stretch: iced::font::Stretch::Normal,
@@ -46,7 +53,7 @@ const CJK_FONT: Font = Font {
 };
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const CJK_FONT: Font = Font {
+const UI_FONT: Font = Font {
     family: iced::font::Family::Name("Noto Sans CJK SC"),
     weight: iced::font::Weight::Normal,
     stretch: iced::font::Stretch::Normal,
@@ -291,6 +298,30 @@ pub struct NeoShell {
     // Log viewer
     show_log_viewer: bool,
     log_viewer_content: String,
+    // Tunnel management
+    tunnel_store: crate::tunnel::TunnelStore,
+    tunnel_manager: Arc<crate::tunnel::TunnelManager>,
+    tunnels: Vec<crate::tunnel::TunnelConfig>,
+    show_tunnel_manager: bool,
+    show_tunnel_form: bool,
+    tunnel_form: TunnelFormData,
+    tunnel_edit_id: Option<String>,
+}
+
+#[derive(Default, Clone)]
+struct TunnelFormData {
+    name: String,
+    ssh_host: String,
+    ssh_port: String,
+    username: String,
+    auth_type: String,  // "password" | "key"
+    password: String,
+    private_key: String,
+    passphrase: String,
+    /// Multi-line forwards, one per line, in "LOCAL:REMOTE_HOST:REMOTE_PORT"
+    /// or "REMOTE_HOST:REMOTE_PORT->LOCAL" format.
+    forwards_text: String,
+    auto_start: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -436,6 +467,27 @@ pub enum Message {
     // Window lifecycle — close button minimizes to taskbar/dock instead of exiting
     WindowCloseRequested(iced::window::Id),
     QuitApp,
+    // Tunnel management
+    ShowTunnelManager,
+    HideTunnelManager,
+    ShowTunnelForm(Option<String>),
+    HideTunnelForm,
+    TunnelFormNameChanged(String),
+    TunnelFormHostChanged(String),
+    TunnelFormPortChanged(String),
+    TunnelFormUserChanged(String),
+    TunnelFormAuthTypeChanged(String),
+    TunnelFormPasswordChanged(String),
+    TunnelFormKeyChanged(String),
+    TunnelFormPassphraseChanged(String),
+    TunnelFormForwardsChanged(String),
+    TunnelFormAutoStartChanged(bool),
+    TunnelFormBrowseKey,
+    SaveTunnel,
+    DeleteTunnel(String),
+    StartTunnel(String),
+    StopTunnel(String),
+    TunnelStateTick,
 
     // Terminal
     SshConnected(String, String, String, String),  // tab_id, session_id, title, connection_id
@@ -774,6 +826,29 @@ impl Default for NeoShell {
             show_error_dialog: false,
             show_log_viewer: false,
             log_viewer_content: String::new(),
+            tunnel_store: crate::tunnel::TunnelStore::new(),
+            tunnel_manager: {
+                // Auto-start any tunnel with auto_start = true on app launch.
+                let mgr = Arc::new(crate::tunnel::TunnelManager::new());
+                let ts = crate::tunnel::TunnelStore::new();
+                for t in ts.load() {
+                    if t.auto_start {
+                        log::info!("auto-starting tunnel '{}'", t.name);
+                        if let Err(e) = mgr.start(t.clone()) {
+                            log::warn!("auto-start failed for '{}': {}", t.name, e);
+                        }
+                    }
+                }
+                mgr
+            },
+            tunnels: {
+                let ts = crate::tunnel::TunnelStore::new();
+                ts.load()
+            },
+            show_tunnel_manager: false,
+            show_tunnel_form: false,
+            tunnel_form: TunnelFormData::default(),
+            tunnel_edit_id: None,
         }
     }
 }
@@ -805,9 +880,6 @@ pub fn run() -> iced::Result {
     const NERD_FONT: &[u8] = include_bytes!(
         "../../assets/fonts/SymbolsNerdFontMono-Regular.ttf"
     );
-    const EMOJI_FONT: &[u8] = include_bytes!(
-        "../../assets/fonts/NotoEmoji-Regular.ttf"
-    );
     const CJK_EMBED: &[u8] = include_bytes!(
         "../../assets/fonts/NotoSansSC-Min.ttf"
     );
@@ -820,9 +892,8 @@ pub fn run() -> iced::Result {
         .antialiasing(true)
         .decorations(true)
         .font(NERD_FONT)
-        .font(EMOJI_FONT)
         .font(CJK_EMBED)
-        .default_font(CJK_FONT)
+        .default_font(UI_FONT)
         .run()
 }
 
@@ -2700,6 +2771,132 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
 
+        // ---- tunnels ---------------------------------------------------------
+        Message::ShowTunnelManager => {
+            state.show_tunnel_manager = true;
+            state.tunnels = state.tunnel_store.load();
+            Task::none()
+        }
+        Message::HideTunnelManager => {
+            state.show_tunnel_manager = false;
+            Task::none()
+        }
+        Message::ShowTunnelForm(edit_id) => {
+            state.show_tunnel_form = true;
+            state.tunnel_edit_id = edit_id.clone();
+            if let Some(id) = edit_id {
+                if let Some(t) = state.tunnels.iter().find(|x| x.id == id) {
+                    state.tunnel_form = TunnelFormData {
+                        name: t.name.clone(),
+                        ssh_host: t.ssh_host.clone(),
+                        ssh_port: t.ssh_port.to_string(),
+                        username: t.username.clone(),
+                        auth_type: t.auth_type.clone(),
+                        password: t.password.clone().unwrap_or_default(),
+                        private_key: t.private_key.clone().unwrap_or_default(),
+                        passphrase: t.passphrase.clone().unwrap_or_default(),
+                        forwards_text: t.forwards.iter()
+                            .map(|f| format!("{}:{}:{}", f.local_port, f.remote_host, f.remote_port))
+                            .collect::<Vec<_>>().join("\n"),
+                        auto_start: t.auto_start,
+                    };
+                }
+            } else {
+                state.tunnel_form = TunnelFormData {
+                    ssh_port: "22".into(),
+                    auth_type: "password".into(),
+                    ..Default::default()
+                };
+            }
+            Task::none()
+        }
+        Message::HideTunnelForm => {
+            state.show_tunnel_form = false;
+            state.tunnel_edit_id = None;
+            state.tunnel_form = TunnelFormData::default();
+            Task::none()
+        }
+        Message::TunnelFormNameChanged(v) => { state.tunnel_form.name = v; Task::none() }
+        Message::TunnelFormHostChanged(v) => { state.tunnel_form.ssh_host = v; Task::none() }
+        Message::TunnelFormPortChanged(v) => { state.tunnel_form.ssh_port = v; Task::none() }
+        Message::TunnelFormUserChanged(v) => { state.tunnel_form.username = v; Task::none() }
+        Message::TunnelFormAuthTypeChanged(v) => { state.tunnel_form.auth_type = v; Task::none() }
+        Message::TunnelFormPasswordChanged(v) => { state.tunnel_form.password = v; Task::none() }
+        Message::TunnelFormKeyChanged(v) => { state.tunnel_form.private_key = v; Task::none() }
+        Message::TunnelFormPassphraseChanged(v) => { state.tunnel_form.passphrase = v; Task::none() }
+        Message::TunnelFormForwardsChanged(v) => { state.tunnel_form.forwards_text = v; Task::none() }
+        Message::TunnelFormAutoStartChanged(v) => { state.tunnel_form.auto_start = v; Task::none() }
+        Message::TunnelFormBrowseKey => {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Select Private Key")
+                .pick_file()
+            {
+                state.tunnel_form.private_key = path.to_string_lossy().to_string();
+            }
+            Task::none()
+        }
+        Message::SaveTunnel => {
+            let forwards: Result<Vec<_>, String> = state.tunnel_form.forwards_text
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .map(crate::tunnel::ForwardRule::parse)
+                .collect();
+            let forwards = match forwards {
+                Ok(f) if !f.is_empty() => f,
+                Ok(_) => {
+                    state.error_message = "At least one forward rule is required".into();
+                    state.show_error_dialog = true;
+                    return Task::none();
+                }
+                Err(e) => {
+                    state.error_message = format!("Forward parse error: {}", e);
+                    state.show_error_dialog = true;
+                    return Task::none();
+                }
+            };
+            let port: u16 = state.tunnel_form.ssh_port.parse().unwrap_or(22);
+            let cfg = crate::tunnel::TunnelConfig {
+                id: state.tunnel_edit_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                name: state.tunnel_form.name.clone(),
+                ssh_host: state.tunnel_form.ssh_host.clone(),
+                ssh_port: port,
+                username: state.tunnel_form.username.clone(),
+                auth_type: state.tunnel_form.auth_type.clone(),
+                password: if state.tunnel_form.password.is_empty() { None } else { Some(state.tunnel_form.password.clone()) },
+                private_key: if state.tunnel_form.private_key.is_empty() { None } else { Some(state.tunnel_form.private_key.clone()) },
+                passphrase: if state.tunnel_form.passphrase.is_empty() { None } else { Some(state.tunnel_form.passphrase.clone()) },
+                forwards,
+                auto_start: state.tunnel_form.auto_start,
+            };
+            state.tunnel_store.upsert(cfg);
+            state.tunnels = state.tunnel_store.load();
+            state.show_tunnel_form = false;
+            state.tunnel_edit_id = None;
+            state.tunnel_form = TunnelFormData::default();
+            Task::none()
+        }
+        Message::DeleteTunnel(id) => {
+            state.tunnel_manager.stop(&id);
+            state.tunnel_store.delete(&id);
+            state.tunnels = state.tunnel_store.load();
+            Task::none()
+        }
+        Message::StartTunnel(id) => {
+            if let Some(cfg) = state.tunnel_store.get(&id) {
+                if let Err(e) = state.tunnel_manager.start(cfg) {
+                    state.error_message = format!("Start tunnel: {}", e);
+                    state.show_error_dialog = true;
+                }
+            }
+            Task::none()
+        }
+        Message::StopTunnel(id) => {
+            state.tunnel_manager.stop(&id);
+            Task::none()
+        }
+        Message::TunnelStateTick => Task::none(),
+
         // ---- language --------------------------------------------------------
         Message::ToggleLanguage => {
             state.locale = if state.locale == "zh-CN" {
@@ -2793,10 +2990,11 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             t
         }
         Message::QuitApp => {
-            log::info!("User requested quit — closing all SSH sessions");
+            log::info!("User requested quit — closing all SSH sessions and tunnels");
             for sid in state.ssh_manager.active_sessions() {
                 let _ = state.ssh_manager.disconnect(&sid);
             }
+            state.tunnel_manager.stop_all();
             let t: Task<Message> = iced::window::get_latest()
                 .and_then(|id| iced::window::close(id));
             t
@@ -2827,6 +3025,11 @@ fn subscription(state: &NeoShell) -> Subscription<Message> {
     // Monitor refresh every 3 seconds when there is an active tab
     if state.screen == Screen::Main && state.active_tab.is_some() {
         subs.push(time::every(Duration::from_secs(3)).map(|_| Message::FetchMonitorData));
+    }
+
+    // When the tunnel panel is open, tick every 2s to refresh connection counts.
+    if state.show_tunnel_manager {
+        subs.push(time::every(Duration::from_secs(2)).map(|_| Message::TunnelStateTick));
     }
 
     // Capture ALL events — keyboard always, scroll only when not captured by widgets
@@ -3203,6 +3406,18 @@ fn view_main(state: &NeoShell) -> Element<'_, Message> {
         .into();
     }
 
+    // Tunnel manager
+    if state.show_tunnel_manager {
+        let tunnel_overlay = view_tunnel_manager(state);
+        return container(stack([
+            container(main_layout).width(Fill).height(Fill).into(),
+            tunnel_overlay,
+        ]))
+        .width(Fill)
+        .height(Fill)
+        .into();
+    }
+
     // Keyboard shortcuts help panel
     if state.show_shortcuts_help {
         let help_overlay = view_shortcuts_help();
@@ -3535,6 +3750,17 @@ fn view_toolbar(state: &NeoShell) -> Element<'_, Message> {
         .on_press(Message::ShowConnectDialog).padding(Padding::from([4, 10])).style(toolbar_style);
     let btn_proxy = button(text(i18n::t("proxy.title")).color(theme::TEXT_SECONDARY).size(12))
         .on_press(Message::ShowProxyManager).padding(Padding::from([4, 10])).style(toolbar_style);
+    // Tunnels button — count running tunnels in the label so user sees status at a glance.
+    let running_tun = state.tunnel_manager.states().iter()
+        .filter(|(_, s)| s.is_running()).count();
+    let tun_label = if running_tun > 0 {
+        format!("{} ({})", i18n::t("tunnel.title"), running_tun)
+    } else {
+        i18n::t("tunnel.title").to_string()
+    };
+    let btn_tunnel = button(text(tun_label).color(
+        if running_tun > 0 { theme::SUCCESS } else { theme::TEXT_SECONDARY }).size(12))
+        .on_press(Message::ShowTunnelManager).padding(Padding::from([4, 10])).style(toolbar_style);
     let btn_history = button(text(i18n::t("history.title")).color(theme::TEXT_SECONDARY).size(12))
         .on_press(Message::ShowHistory).padding(Padding::from([4, 10])).style(toolbar_style);
     let btn_settings = button(text(i18n::t("settings.title")).color(theme::TEXT_SECONDARY).size(12))
@@ -3545,6 +3771,7 @@ fn view_toolbar(state: &NeoShell) -> Element<'_, Message> {
         sep,
         btn_new,
         btn_proxy,
+        btn_tunnel,
         btn_history,
         horizontal_space(),
         session_info,
@@ -6143,6 +6370,169 @@ fn view_status_bar(state: &NeoShell) -> Element<'_, Message> {
             ..Default::default()
         })
         .into()
+}
+
+// ---- Tunnel manager ---------------------------------------------------------
+
+fn view_tunnel_manager(state: &NeoShell) -> Element<'_, Message> {
+    let title = text(i18n::t("tunnel.title")).size(16).color(theme::TEXT_PRIMARY);
+    let close_btn = button(text("x").font(Font::MONOSPACE).color(theme::TEXT_MUTED).size(14))
+        .on_press(Message::HideTunnelManager)
+        .padding(Padding::from([2, 8]))
+        .style(transparent_button_style);
+    let add_btn = button(text(i18n::t("tunnel.add")).font(Font::MONOSPACE).color(theme::ACCENT).size(11))
+        .on_press(Message::ShowTunnelForm(None))
+        .padding(Padding::from([4, 8]))
+        .style(transparent_button_style);
+    let header = row![title, horizontal_space(), add_btn, close_btn]
+        .align_y(alignment::Vertical::Center);
+
+    let mut list_col = column![].spacing(4);
+
+    // Inline form
+    if state.show_tunnel_form {
+        let form_title = if state.tunnel_edit_id.is_some() { i18n::t("tunnel.edit") } else { i18n::t("tunnel.add") };
+        let name_in = text_input(i18n::t("tunnel.name"), &state.tunnel_form.name)
+            .on_input(Message::TunnelFormNameChanged).padding(6).size(12);
+        let host_in = text_input(i18n::t("tunnel.ssh_host"), &state.tunnel_form.ssh_host)
+            .on_input(Message::TunnelFormHostChanged).padding(6).size(12);
+        let port_in = text_input(i18n::t("tunnel.ssh_port"), &state.tunnel_form.ssh_port)
+            .on_input(Message::TunnelFormPortChanged).padding(6).size(12).width(80);
+        let user_in = text_input(i18n::t("tunnel.user"), &state.tunnel_form.username)
+            .on_input(Message::TunnelFormUserChanged).padding(6).size(12);
+
+        let auth_pwd_btn = button(text(i18n::t("proxy.bastion.auth_password"))
+            .color(if state.tunnel_form.auth_type != "key" { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED }).size(11))
+            .on_press(Message::TunnelFormAuthTypeChanged("password".into()))
+            .padding(Padding::from([4, 8]))
+            .style(if state.tunnel_form.auth_type != "key" { accent_button_style } else { transparent_button_style });
+        let auth_key_btn = button(text(i18n::t("proxy.bastion.auth_key"))
+            .color(if state.tunnel_form.auth_type == "key" { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED }).size(11))
+            .on_press(Message::TunnelFormAuthTypeChanged("key".into()))
+            .padding(Padding::from([4, 8]))
+            .style(if state.tunnel_form.auth_type == "key" { accent_button_style } else { transparent_button_style });
+
+        let secret: Element<'_, Message> = if state.tunnel_form.auth_type == "key" {
+            let key_in = text_input(i18n::t("proxy.bastion.key_path"), &state.tunnel_form.private_key)
+                .on_input(Message::TunnelFormKeyChanged).padding(6).size(12);
+            let browse = button(text(i18n::t("proxy.bastion.browse")).color(theme::ACCENT).size(11))
+                .on_press(Message::TunnelFormBrowseKey)
+                .padding(Padding::from([4, 8])).style(transparent_button_style);
+            let pass = text_input(i18n::t("proxy.bastion.passphrase"), &state.tunnel_form.passphrase)
+                .on_input(Message::TunnelFormPassphraseChanged).padding(6).size(12).secure(true);
+            column![row![key_in, browse].spacing(4), pass].spacing(6).into()
+        } else {
+            text_input(i18n::t("proxy.password"), &state.tunnel_form.password)
+                .on_input(Message::TunnelFormPasswordChanged).padding(6).size(12).secure(true).into()
+        };
+
+        let fwd_label = text(i18n::t("tunnel.forwards_label")).color(theme::TEXT_SECONDARY).size(11);
+        let fwd_hint = text(i18n::t("tunnel.forwards_hint")).color(theme::TEXT_MUTED).size(10);
+        let fwd_in = text_input("", &state.tunnel_form.forwards_text)
+            .on_input(Message::TunnelFormForwardsChanged).padding(6).size(12);
+
+        let save = button(text(i18n::t("proxy.save")).color(theme::TEXT_PRIMARY).size(11))
+            .on_press(Message::SaveTunnel).padding(Padding::from([4, 12])).style(accent_button_style);
+        let cancel = button(text(i18n::t("proxy.cancel")).color(theme::TEXT_MUTED).size(11))
+            .on_press(Message::HideTunnelForm).padding(Padding::from([4, 8])).style(transparent_button_style);
+
+        let form_col = column![
+            text(form_title).color(theme::TEXT_PRIMARY).size(13),
+            name_in,
+            row![host_in, port_in].spacing(4),
+            user_in,
+            row![auth_pwd_btn, auth_key_btn].spacing(4),
+            secret,
+            fwd_label,
+            fwd_hint,
+            fwd_in,
+            row![cancel, save].spacing(8),
+        ].spacing(6).padding(10).width(Fill);
+
+        list_col = list_col.push(
+            container(form_col).style(|_| container::Style {
+                background: Some(theme::BG_TERTIARY.into()),
+                border: iced::Border { color: theme::BORDER, width: 1.0, radius: 4.0.into() },
+                ..Default::default()
+            })
+        );
+    }
+
+    if state.tunnels.is_empty() && !state.show_tunnel_form {
+        list_col = list_col.push(
+            container(text(i18n::t("tunnel.empty")).color(theme::TEXT_MUTED).size(12))
+                .padding(Padding::from([16, 8])),
+        );
+    }
+
+    let states = state.tunnel_manager.states();
+    for t in &state.tunnels {
+        let id = t.id.clone();
+        let tid1 = id.clone();
+        let tid2 = id.clone();
+        let tid3 = id.clone();
+        let st = states.get(&id).cloned().unwrap_or(crate::tunnel::TunnelState::Stopped);
+
+        let (status_text, status_color) = match &st {
+            crate::tunnel::TunnelState::Stopped => (i18n::t("tunnel.stopped").to_string(), theme::TEXT_MUTED),
+            crate::tunnel::TunnelState::Starting => (i18n::t("tunnel.starting").to_string(), theme::WARNING),
+            crate::tunnel::TunnelState::Running { connections, .. } =>
+                (format!("{} ({})", i18n::t("tunnel.running"), connections), theme::SUCCESS),
+            crate::tunnel::TunnelState::Failed(e) => (format!("ERR: {}", e), theme::DANGER),
+        };
+
+        let running = st.is_running();
+        let run_btn: Element<'_, Message> = if running {
+            button(text(i18n::t("tunnel.stop")).color(theme::DANGER).size(10))
+                .on_press(Message::StopTunnel(tid1))
+                .padding(Padding::from([2, 6])).style(transparent_button_style).into()
+        } else {
+            button(text(i18n::t("tunnel.start")).color(theme::SUCCESS).size(10))
+                .on_press(Message::StartTunnel(tid1))
+                .padding(Padding::from([2, 6])).style(transparent_button_style).into()
+        };
+        let edit = button(text(i18n::t("proxy.edit")).color(theme::TEXT_SECONDARY).size(10))
+            .on_press(Message::ShowTunnelForm(Some(tid2)))
+            .padding(Padding::from([2, 6])).style(transparent_button_style);
+        let del = button(text(i18n::t("proxy.delete")).color(theme::DANGER).size(10))
+            .on_press(Message::DeleteTunnel(tid3))
+            .padding(Padding::from([2, 6])).style(transparent_button_style);
+
+        let forwards_summary = t.forwards.iter()
+            .map(|f| format!("{}→{}:{}", f.local_port, f.remote_host, f.remote_port))
+            .collect::<Vec<_>>().join(", ");
+
+        let entry = row![
+            column![
+                text(&t.name).color(theme::TEXT_PRIMARY).size(12),
+                text(format!("{}@{}:{}", t.username, t.ssh_host, t.ssh_port)).color(theme::TEXT_MUTED).size(10),
+                text(forwards_summary).color(theme::TEXT_MUTED).size(10),
+                text(status_text).color(status_color).size(10),
+            ].spacing(2).width(Fill),
+            run_btn, edit, del,
+        ].spacing(4).align_y(alignment::Vertical::Center);
+
+        list_col = list_col.push(
+            container(entry).padding(Padding::from([6, 10])).width(Fill)
+                .style(|_| container::Style {
+                    background: Some(theme::BG_TERTIARY.into()),
+                    border: iced::Border { color: theme::BORDER, width: 1.0, radius: 4.0.into() },
+                    ..Default::default()
+                })
+        );
+    }
+
+    let content = column![header, scrollable(list_col).height(Fill)]
+        .spacing(10).padding(16).width(480);
+
+    let card = container(content).height(Fill).style(|_| container::Style {
+        background: Some(theme::BG_SECONDARY.into()),
+        border: iced::Border { color: theme::BORDER, width: 1.0, radius: 0.0.into() },
+        shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.4), offset: iced::Vector::new(-4.0, 0.0), blur_radius: 16.0 },
+        ..Default::default()
+    });
+    let overlay = row![horizontal_space(), card];
+    container(overlay).width(Fill).height(Fill).into()
 }
 
 // ---- Connection form (modal overlay) -------------------------------------

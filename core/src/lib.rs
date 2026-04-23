@@ -8,6 +8,7 @@ mod ssh;
 mod sshconfig;
 mod storage;
 mod terminal;
+mod tunnel;
 mod ui;
 pub mod updater;
 

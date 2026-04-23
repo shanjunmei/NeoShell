@@ -108,6 +108,21 @@ static EN: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("log.open_folder", "Open Folder");
     m.insert("status.log", "LOG");
     m.insert("status.quit", "QUIT");
+    m.insert("tunnel.title", "Tunnels");
+    m.insert("tunnel.add", "+ Add Tunnel");
+    m.insert("tunnel.edit", "Edit Tunnel");
+    m.insert("tunnel.name", "Name");
+    m.insert("tunnel.ssh_host", "SSH Host");
+    m.insert("tunnel.ssh_port", "Port");
+    m.insert("tunnel.user", "Username");
+    m.insert("tunnel.forwards_label", "Port Forwards");
+    m.insert("tunnel.forwards_hint", "One per line: LOCAL:REMOTE_HOST:REMOTE_PORT (e.g. 8080:10.0.0.5:80)");
+    m.insert("tunnel.empty", "No tunnels configured");
+    m.insert("tunnel.start", "Start");
+    m.insert("tunnel.stop", "Stop");
+    m.insert("tunnel.running", "Running");
+    m.insert("tunnel.stopped", "Stopped");
+    m.insert("tunnel.starting", "Starting...");
     // SSH error hints
     m.insert("ssh.err.auth", "wrong username/password or key — check credentials or server sshd permissions");
     m.insert("ssh.err.refused", "target port closed — confirm SSH service is running on the right port (usually 22)");
@@ -317,6 +332,21 @@ static ZH: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("log.open_folder", "打开目录");
     m.insert("status.log", "日志");
     m.insert("status.quit", "退出");
+    m.insert("tunnel.title", "隧道管理");
+    m.insert("tunnel.add", "+ 新增隧道");
+    m.insert("tunnel.edit", "编辑隧道");
+    m.insert("tunnel.name", "名称");
+    m.insert("tunnel.ssh_host", "SSH 主机");
+    m.insert("tunnel.ssh_port", "端口");
+    m.insert("tunnel.user", "用户名");
+    m.insert("tunnel.forwards_label", "端口转发规则");
+    m.insert("tunnel.forwards_hint", "每行一条：本地端口:远端主机:远端端口 (例 8080:10.0.0.5:80)");
+    m.insert("tunnel.empty", "暂无隧道配置");
+    m.insert("tunnel.start", "启动");
+    m.insert("tunnel.stop", "停止");
+    m.insert("tunnel.running", "运行中");
+    m.insert("tunnel.stopped", "已停止");
+    m.insert("tunnel.starting", "启动中...");
     // SSH 错误提示
     m.insert("ssh.err.auth", "用户名或密码/密钥不正确 — 请检查账号凭据，或确认服务器 sshd 是否允许此用户登录");
     m.insert("ssh.err.refused", "目标端口未开放 — 确认 SSH 服务已启动且端口号正确 (通常是 22)");
