@@ -20,12 +20,14 @@ use crate::i18n;
 use crate::ui::theme;
 use crate::updater::Updater;
 
-/// CJK font used by the terminal canvas for wide characters. Always points
-/// at the embedded NotoSansSC-Min.ttf (family "Noto Sans CJK SC") — canvas
-/// text rendering via Family::Name doesn't do reliable glyph-level fallback,
-/// so CJK MUST resolve to a family that actually contains Han ideographs.
-/// Our embedded subset guarantees this across macOS / Windows 10/11 / Linux
-/// regardless of which system CJK fonts happen to be installed.
+/// Single source of truth for UI + terminal CJK rendering. Always points at
+/// the embedded NotoSansSC-Min.ttf (family "Noto Sans CJK SC"). We used to
+/// try a Latin-first platform font (Segoe UI / PingFang SC) as UI_FONT and
+/// rely on glyph-level fallback, but iced/cosmic-text's Family::Name match
+/// is exact — no per-glyph fallback — so CJK text on buttons and labels
+/// rendered as tofu under any non-CJK-covering family. Using the embedded
+/// CJK family for everything guarantees uniform rendering on every install;
+/// Latin glyphs from Noto Sans CJK SC look fine in a UI context.
 const CJK_FONT: Font = Font {
     family: iced::font::Family::Name("Noto Sans CJK SC"),
     weight: iced::font::Weight::Normal,
@@ -33,32 +35,7 @@ const CJK_FONT: Font = Font {
     style: iced::font::Style::Normal,
 };
 
-/// Primary UI font — used as iced's default_font. Text-widget rendering does
-/// glyph-level fallback, so a Latin-first family renders CJK via the embedded
-/// NotoSansSC-Min.ttf fallback; the UI keeps a native per-platform look.
-#[cfg(target_os = "macos")]
-const UI_FONT: Font = Font {
-    family: iced::font::Family::Name("PingFang SC"),
-    weight: iced::font::Weight::Normal,
-    stretch: iced::font::Stretch::Normal,
-    style: iced::font::Style::Normal,
-};
-
-#[cfg(target_os = "windows")]
-const UI_FONT: Font = Font {
-    family: iced::font::Family::Name("Segoe UI"),
-    weight: iced::font::Weight::Normal,
-    stretch: iced::font::Stretch::Normal,
-    style: iced::font::Style::Normal,
-};
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const UI_FONT: Font = Font {
-    family: iced::font::Family::Name("Noto Sans CJK SC"),
-    weight: iced::font::Weight::Normal,
-    stretch: iced::font::Stretch::Normal,
-    style: iced::font::Style::Normal,
-};
+const UI_FONT: Font = CJK_FONT;
 
 // ---------------------------------------------------------------------------
 // ZMODEM protocol detection
