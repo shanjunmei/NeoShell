@@ -154,6 +154,7 @@ footer p{color:var(--text-faint);font-size:12px;letter-spacing:.04em}
       <a href="#tech" data-i18n="nav.stack">Stack</a>
       <a href="#security" data-i18n="nav.security">Security</a>
       <a href="#changelog" data-i18n="nav.changelog">Log</a>
+      <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener">GitHub</a>
       <a href="#download" class="nav-cta" data-i18n="nav.download">Download</a>
     </div>
     <div class="lang-switch" id="langSwitch" role="button" aria-label="Switch language">
@@ -165,12 +166,12 @@ footer p{color:var(--text-faint);font-size:12px;letter-spacing:.04em}
 
 <!-- ═══ HERO ═══ -->
 <section class="hero">
-  <div class="hero-tag" data-i18n="hero.tag">Pure Rust &bull; Native GPU &bull; Zero Dependencies</div>
+  <div class="hero-tag" data-i18n="hero.tag">Pure Rust &bull; Native GPU &bull; Open Source</div>
   <h1 data-i18n="hero.title">The terminal you<br>actually <em>want</em> to use.</h1>
-  <p class="hero-sub" data-i18n="hero.sub">NeoShell is a native SSH manager built entirely in Rust. Encrypted vault, real-time monitoring, multi-tab terminals, SFTP &mdash; all in a single 6MB binary.</p>
+  <p class="hero-sub" data-i18n="hero.sub">NeoShell is a native SSH manager built entirely in Rust. Encrypted vault, real-time monitoring, multi-tab terminals, SFTP &mdash; all in a single 6MB binary. Now fully open source on GitHub.</p>
   <div class="hero-actions">
-    <a href="#download" class="btn-hero btn-fill" data-i18n="hero.btn.download">Download v0.6.16</a>
-    <a href="#features" class="btn-hero btn-ghost" data-i18n="hero.btn.explore">Explore features</a>
+    <a href="#download" class="btn-hero btn-fill" data-i18n="hero.btn.download">Download v0.6.17</a>
+    <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener" class="btn-hero btn-ghost" data-i18n="hero.btn.source">View on GitHub &rarr;</a>
   </div>
   <div class="hero-metric">
     <div class="metric"><div class="metric-num">6 MB</div><div class="metric-label" data-i18n="hero.metric.binary">Binary size</div></div>
@@ -236,7 +237,7 @@ footer p{color:var(--text-faint);font-size:12px;letter-spacing:.04em}
           <li data-i18n="sec.item3">Vault file is binary noise without the correct password</li>
           <li data-i18n="sec.item4">Dedicated exec SSH session &mdash; no lock contention with terminal</li>
           <li data-i18n="sec.item5">Private keys encrypted at rest, decrypted only in memory</li>
-          <li data-i18n="sec.item6">Closed-source proprietary &mdash; no code exposure risk</li>
+          <li data-i18n-html="sec.item6">Open source on <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener">GitHub</a> &mdash; audit the crypto, fork, contribute</li>
         </ul>
       </div>
     </div>
@@ -248,32 +249,32 @@ footer p{color:var(--text-faint);font-size:12px;letter-spacing:.04em}
   <div class="wrap">
     <div class="section-label" data-i18n="dl.label">Get started</div>
     <h2 class="section-title" data-i18n="dl.title">Download NeoShell</h2>
-    <p class="section-desc" data-i18n="dl.desc">v0.6.16 &mdash; Single binary. No installer dependencies.</p>
+    <p class="section-desc" data-i18n="dl.desc">v0.6.17 &mdash; Single binary. No installer dependencies.</p>
     <div class="dl-grid">
       <div class="dl-card">
         <div class="dl-os">&#63743;</div>
         <div class="dl-name" data-i18n="dl.macos">macOS</div>
         <div class="dl-arch">Apple Silicon &amp; Intel</div>
-        <a href="downloads/NeoShell-0.6.16-macos-aarch64.dmg" class="dl-btn" data-i18n="dl.macos.arm">ARM64 .dmg &darr;</a>
-        <a href="downloads/NeoShell-0.6.16-macos-x86_64.dmg" class="dl-btn-alt" data-i18n="dl.macos.intel">Intel x86_64 .dmg</a>
+        <a href="downloads/NeoShell-0.6.17-macos-aarch64.dmg" class="dl-btn" data-i18n="dl.macos.arm">ARM64 .dmg &darr;</a>
+        <a href="downloads/NeoShell-0.6.17-macos-x86_64.dmg" class="dl-btn-alt" data-i18n="dl.macos.intel">Intel x86_64 .dmg</a>
       </div>
       <div class="dl-card">
         <div class="dl-os">&#128187;</div>
         <div class="dl-name" data-i18n="dl.windows">Windows</div>
         <div class="dl-arch">x86_64 (Win10+)</div>
-        <a href="downloads/NeoShell-0.6.16-windows-x64.zip" class="dl-btn" data-i18n="dl.windows.btn">Download .zip &darr;</a>
+        <a href="downloads/NeoShell-0.6.17-windows-x64.zip" class="dl-btn" data-i18n="dl.windows.btn">Download .zip &darr;</a>
       </div>
       <div class="dl-card">
         <div class="dl-os">&#128187;</div>
         <div class="dl-name" data-i18n="dl.win7">Windows 7</div>
         <div class="dl-arch">x86_64 (OpenGL)</div>
-        <a href="downloads/NeoShell-0.6.16-windows-win7-x64.zip" class="dl-btn" data-i18n="dl.win7.btn">Download .zip &darr;</a>
+        <a href="downloads/NeoShell-0.6.17-windows-win7-x64.zip" class="dl-btn" data-i18n="dl.win7.btn">Download .zip &darr;</a>
       </div>
       <div class="dl-card">
         <div class="dl-os">&#128039;</div>
         <div class="dl-name" data-i18n="dl.linux">Linux</div>
         <div class="dl-arch">x86_64</div>
-        <a href="downloads/NeoShell-0.6.16-linux-x86_64.AppImage" class="dl-btn" data-i18n="dl.linux.btn">Download .AppImage &darr;</a>
+        <a href="downloads/NeoShell-0.6.17-linux-x86_64.AppImage" class="dl-btn" data-i18n="dl.linux.btn">Download .AppImage &darr;</a>
       </div>
     </div>
     <p style="margin-top:28px;color:var(--text-faint);font-size:12px" data-i18n="dl.note">Proprietary software. Contact us for enterprise licensing.</p>
@@ -289,14 +290,29 @@ footer p{color:var(--text-faint);font-size:12px;letter-spacing:.04em}
 
     <div class="cl-entry">
       <div class="cl-head">
-        <span class="cl-ver">0.6.16</span>
+        <span class="cl-ver">0.6.17</span>
         <span class="cl-date">2026-04-24</span>
         <span class="cl-badge" data-i18n="cl.latest">Latest</span>
       </div>
+      <div class="cl-cat cl-cat-add" data-i18n="cl.cat.added">Added</div>
+      <ul class="cl-list" data-i18n-html="cl.0617.added">
+        <li><strong>NeoShell is now open source</strong> &mdash; full source at <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener">github.com/uk0/NeoShell</a>. Audit the crypto, file issues, fork, or send PRs</li>
+      </ul>
+      <div class="cl-cat cl-cat-fix" data-i18n="cl.cat.fixed">Fixed</div>
+      <ul class="cl-list" data-i18n-html="cl.0617.fixed">
+        <li><code>ls</code> / <code>top</code> / <code>htop</code> output clipped off the right edge &mdash; canvas-side grid resize now propagates to the remote SSH PTY via <code>ch.request_pty_size()</code>, so the server re-wraps output to the actual visible width instead of the initial 120-col default</li>
+        <li>Welcome / motd disappearing + blank rows after window resize &mdash; <code>TerminalGrid::resize</code> shrink path rewritten to preserve the cursor row (active prompt) and push displaced top rows into scrollback; grow path rehydrates from scrollback to avoid blank-flash</li>
+      </ul>
+    </div>
+
+    <div class="cl-entry">
+      <div class="cl-head">
+        <span class="cl-ver">0.6.16</span>
+        <span class="cl-date">2026-04-24</span>
+      </div>
       <div class="cl-cat cl-cat-fix" data-i18n="cl.cat.fixed">Fixed</div>
       <ul class="cl-list" data-i18n-html="cl.0616.fixed">
-        <li>Residual CJK tofu on 8 Chinese buttons (Proxy add/test/edit/delete, History clear, Status-bar LOG/QUIT, Tunnel + Add Tunnel) &mdash; they forced <code>.font(Font::MONOSPACE)</code> which resolves to Consolas/Courier on Windows and has no CJK glyphs, overriding the default CJK font. Dropped the overrides so they inherit the embedded Noto Sans CJK SC</li>
-        <li>"Tunnel Add button unresponsive" — was a font-rendering illusion: the button was clickable, the form did expand inline, but every label was tofu so the user couldn't visually confirm anything happened. Resolved by the font fix above</li>
+        <li>Residual CJK tofu on 8 Chinese buttons (Proxy add/test/edit/delete, History clear, Status-bar LOG/QUIT, Tunnel + Add Tunnel) &mdash; dropped <code>Font::MONOSPACE</code> overrides so they inherit the CJK-capable default font</li>
       </ul>
     </div>
 
@@ -554,7 +570,7 @@ footer p{color:var(--text-faint);font-size:12px;letter-spacing:.04em}
 </section>
 
 <footer>
-  <p data-i18n="footer.text">&copy; 2026 NeoShell &mdash; Built with Rust &hearts; &mdash; All Rights Reserved</p>
+  <p data-i18n-html="footer.text">&copy; 2026 NeoShell &mdash; Built with Rust &hearts; &mdash; Open source on <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener">GitHub</a></p>
 </footer>
 
 
@@ -573,11 +589,12 @@ const TRANSLATIONS = {
     'nav.changelog':'Log',
     'nav.download': 'Download',
     /* hero */
-    'hero.tag':          'Pure Rust &bull; Native GPU &bull; Zero Dependencies',
+    'hero.tag':          'Pure Rust &bull; Native GPU &bull; Open Source',
     'hero.title':        'The terminal you<br>actually <em>want</em> to use.',
     'hero.sub':          'NeoShell is a native SSH manager built entirely in Rust. Encrypted vault, real-time monitoring, multi-tab terminals, SFTP &mdash; all in a single 6MB binary.',
-    'hero.btn.download': 'Download v0.6.16',
+    'hero.btn.download': 'Download v0.6.17',
     'hero.btn.explore':  'Explore features',
+    'hero.btn.source':   'View on GitHub &rarr;',
     'hero.metric.binary':    'Binary size',
     'hero.metric.start':     'Cold start',
     'hero.metric.memory':    'Memory usage',
@@ -611,11 +628,11 @@ const TRANSLATIONS = {
     'sec.item3': 'Vault file is binary noise without the correct password',
     'sec.item4': 'Dedicated exec SSH session &mdash; no lock contention with terminal',
     'sec.item5': 'Private keys encrypted at rest, decrypted only in memory',
-    'sec.item6': 'Closed-source proprietary &mdash; no code exposure risk',
+    'sec.item6': 'Open source on <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener">GitHub</a> &mdash; audit the crypto, fork, contribute',
     /* download */
     'dl.label':       'Get started',
     'dl.title':       'Download NeoShell',
-    'dl.desc':        'v0.6.16 &mdash; Single binary. No installer dependencies.',
+    'dl.desc':        'v0.6.17 &mdash; Single binary. No installer dependencies.',
     'dl.macos':       'macOS',
     'dl.macos.arm':   'ARM64 .dmg &darr;',
     'dl.macos.intel': 'Intel x86_64 .dmg',
@@ -639,7 +656,7 @@ const TRANSLATIONS = {
     'contact.label': 'Stay in touch',
     'contact.title': 'Join the Community',
     /* footer */
-    'footer.text': '&copy; 2026 NeoShell &mdash; Built with Rust &hearts; &mdash; All Rights Reserved',
+    'footer.text': '&copy; 2026 NeoShell &mdash; Built with Rust &hearts; &mdash; Open source on <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener">GitHub</a>',
   },
 
   zh: {
@@ -651,11 +668,12 @@ const TRANSLATIONS = {
     'nav.changelog':'更新日志',
     'nav.download': '下载',
     /* hero */
-    'hero.tag':          '纯 Rust 构建 &bull; 原生 GPU 渲染 &bull; 零外部依赖',
+    'hero.tag':          '纯 Rust 构建 &bull; 原生 GPU 渲染 &bull; 完全开源',
     'hero.title':        '你真正<em>想用</em>的<br>那款终端。',
     'hero.sub':          'NeoShell 是一款完全用 Rust 打造的原生 SSH 管理器。加密凭据库、实时监控、多标签终端、SFTP 文件管理——全部集成在一个 6MB 的单文件可执行程序中。',
-    'hero.btn.download': '下载 v0.6.16',
+    'hero.btn.download': '下载 v0.6.17',
     'hero.btn.explore':  '探索功能',
+    'hero.btn.source':   '查看源码 &rarr;',
     'hero.metric.binary':    '程序体积',
     'hero.metric.start':     '冷启动时间',
     'hero.metric.memory':    '内存占用',
@@ -689,11 +707,11 @@ const TRANSLATIONS = {
     'sec.item3': '没有正确密码，Vault 文件形同随机噪声',
     'sec.item4': '独立的 SSH exec 会话——与终端互不干扰',
     'sec.item5': '私钥加密保存，仅在内存中解密使用',
-    'sec.item6': '闭源私有软件——无源码泄露风险',
+    'sec.item6': '开源 @ <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener">GitHub</a> — 可审计加密实现、可 fork、可贡献',
     /* download */
     'dl.label':       '立即开始',
     'dl.title':       '下载 NeoShell',
-    'dl.desc':        'v0.6.16 &mdash; 单文件可执行，无需安装依赖。',
+    'dl.desc':        'v0.6.17 &mdash; 单文件可执行，无需安装依赖。',
     'dl.macos':       'macOS',
     'dl.macos.arm':   'ARM64 .dmg &darr;',
     'dl.macos.intel': 'Intel x86_64 .dmg',
@@ -713,7 +731,9 @@ const TRANSLATIONS = {
     'cl.cat.arch':  '架构调整',
     'cl.cat.perf':  '性能优化',
     'cl.cat.fixed': '问题修复',
-    'cl.0616.fixed': '<li>8 处中文按钮残余 tofu（代理管理 add/test/edit/delete、历史清空、状态栏 LOG/QUIT、隧道 + 新增隧道）— 它们强制 <code>.font(Font::MONOSPACE)</code>，在 Windows 解析成 Consolas/Courier 没有 CJK 字形，覆盖了 default_font。移除这些覆写，继承嵌入的 Noto Sans CJK SC</li><li>"隧道 Add 按钮无响应"—— 实际是字体渲染错觉：按钮可点、表单 inline 展开了，但按钮+展开内容全是 tofu 看不出差异。字体修好后感知问题消失</li>',
+    'cl.0617.added': '<li><strong>NeoShell 现已开源</strong> — 完整源码仓库 <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener">github.com/uk0/NeoShell</a>。欢迎审计加密实现、提 issue、fork、PR</li>',
+    'cl.0617.fixed': '<li><code>ls</code> / <code>top</code> / <code>htop</code> 输出右边被截断 — canvas grid resize 现在同步到远端 SSH PTY（<code>ch.request_pty_size()</code>），服务器按实际可见宽度重排输出，不再按初始 120 cols 格式化</li><li>窗口 resize 后 Welcome/motd 消失 + 空白行 — <code>TerminalGrid::resize</code> 重写 shrink 路径，保留 cursor 所在的 prompt 行、把上方多余行推进 scrollback；grow 时从 scrollback 填回顶部避免空白闪烁</li>',
+    'cl.0616.fixed': '<li>8 处中文按钮残余 tofu（代理管理 add/test/edit/delete、历史清空、状态栏 LOG/QUIT、隧道 + 新增隧道）— 移除 <code>Font::MONOSPACE</code> 覆写让它们继承嵌入的 Noto Sans CJK SC</li>',
     'cl.0615.fixed': '<li>统一 UI_FONT 和 CJK_FONT 都用嵌入的 Noto Sans CJK SC，所有平台 text widget + canvas 都能渲染中文</li>',
     'cl.0614.fixed': '<li>终端 session 里服务器返回的中文 — pyftsubset 精简时清空了嵌入字体的 <code>name</code> 表，重做 subset 保留 name 记录，Family::Name 现在能命中</li><li>移除坏的"emoji 字体" embed（66 KB 的 GitHub 404 HTML 页，每次启动触发 fontdb "malformed font"）</li>',
     'cl.0614.added': '<li><strong>SSH 隧道管理</strong>（工具栏"隧道管理"按钮）— 通过跳板机持续端口转发，独立于终端 tab；每条隧道一条 SSH 会话支持多个 <code>本地端口:远端主机:远端端口</code> 映射，密码/密钥认证，auto_start 应用启动自动拉起，工具栏运行中显示绿色徽标</li><li>参考 <a href="https://github.com/uk0/sshrw">github.com/uk0/sshrw</a> 设计；同时支持紧凑（<code>8080:10.0.0.5:80</code>）和箭头（<code>10.0.0.5:80-&gt;8080</code>）两种规则语法</li>',
@@ -733,7 +753,7 @@ const TRANSLATIONS = {
     'contact.label': '保持联系',
     'contact.title': '加入社区',
     /* footer */
-    'footer.text': '&copy; 2026 NeoShell &mdash; 用 Rust &hearts; 构建 &mdash; 保留所有权利',
+    'footer.text': '&copy; 2026 NeoShell &mdash; 用 Rust &hearts; 构建 &mdash; 开源 @ <a href="https://github.com/uk0/NeoShell" target="_blank" rel="noopener">GitHub</a>',
   }
 };
 
