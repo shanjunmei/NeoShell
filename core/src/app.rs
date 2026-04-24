@@ -2439,7 +2439,8 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ShowSettings => {
-            state.show_settings = true;
+            // Toggle: second click closes the panel.
+            state.show_settings = !state.show_settings;
             Task::none()
         }
         Message::HideSettings => {
@@ -2447,8 +2448,9 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ShowAbout => {
+            // Toggle: second click closes.
             state.show_settings = false;
-            state.show_about = true;
+            state.show_about = !state.show_about;
             Task::none()
         }
         Message::HideAbout => {
@@ -2463,7 +2465,8 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
 
         // ---- command history -------------------------------------------------
         Message::ShowHistory => {
-            state.show_history = true;
+            // Toggle: second click closes.
+            state.show_history = !state.show_history;
             state.history_filter.clear();
             Task::none()
         }
@@ -2617,9 +2620,12 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
 
         // ---- proxy management ------------------------------------------------
         Message::ShowProxyManager => {
-            state.proxies = state.proxy_store.load();
-            state.show_proxy_manager = true;
-            state.proxy_edit_id = None;
+            // Toggle: second click closes the side panel.
+            state.show_proxy_manager = !state.show_proxy_manager;
+            if state.show_proxy_manager {
+                state.proxies = state.proxy_store.load();
+                state.proxy_edit_id = None;
+            }
             Task::none()
         }
         Message::HideProxyManager => {
@@ -2750,8 +2756,11 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
 
         // ---- tunnels ---------------------------------------------------------
         Message::ShowTunnelManager => {
-            state.show_tunnel_manager = true;
-            state.tunnels = state.tunnel_store.load();
+            // Toggle: second click closes.
+            state.show_tunnel_manager = !state.show_tunnel_manager;
+            if state.show_tunnel_manager {
+                state.tunnels = state.tunnel_store.load();
+            }
             Task::none()
         }
         Message::HideTunnelManager => {
@@ -2920,14 +2929,18 @@ fn update(state: &mut NeoShell, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ShowLogViewer => {
-            // Load last ~200 KB of the log file
+            // Toggle: second click closes.
+            if state.show_log_viewer {
+                state.show_log_viewer = false;
+                state.log_viewer_content.clear();
+                return Task::none();
+            }
             let path = crate::log_file_path();
             let content = match std::fs::read_to_string(&path) {
                 Ok(c) => {
                     const MAX: usize = 200 * 1024;
                     if c.len() > MAX {
                         let start = c.len() - MAX;
-                        // align to a newline to avoid mid-line chop
                         let aligned = c[start..].find('\n').map(|i| start + i + 1).unwrap_or(start);
                         format!("…(showing last {} KB)…\n{}", (c.len() - aligned) / 1024, &c[aligned..])
                     } else {
